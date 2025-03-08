@@ -8,16 +8,16 @@ from torch.utils.data import DataLoader, Subset
 
 
 class Server(typing.Protocol):
-    def run(self, rounds: int) -> RunResult: ...
+    def run(self, rounds: int, test_loader: DataLoader) -> RunResult: ...
 
 
 class AbstractServer(ABC, Server):
     def __init__(
-        self, model: torch.nn.Module, parameters: RoundParameters, device: torch.device
+        self, device: torch.device, model: torch.nn.Module, parameters: RoundParameters,
     ) -> None:
+        self.device = device
         self.model = model
         self.parameters = parameters
-        self.device = device
 
         torch.manual_seed(parameters.seed)
 
@@ -61,6 +61,7 @@ class DecentralizedServer(AbstractServer):
         device: torch.device,
     ) -> None:
         super().__init__(
+            device,
             model,
             RoundParameters(
                 clients_count=len(client_subsets),
@@ -70,7 +71,6 @@ class DecentralizedServer(AbstractServer):
                 learning_rate=learning_rate,
                 seed=seed,
             ),
-            device,
         )
 
         self.generator = np.random.default_rng(seed)
