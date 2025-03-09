@@ -73,7 +73,7 @@ class FedSgdGradientServer(DecentralizedServer):
                 + epoch * self.clients_per_round,
                 total_epoch_dataset_size=client_dataset_size,
             )
-            for client_idx in tqdm(client_indices, "clients")
+            for client_idx in tqdm(client_indices, "clients", leave=False)
         ]
 
         aggregated_client_gradients: list[torch.Tensor] = [

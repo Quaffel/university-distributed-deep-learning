@@ -45,7 +45,7 @@ class AbstractServer(ABC, Server):
                 )
                 total_predictions += batch_predictions.size(dim=0)
 
-        print("correct: ", correct_predictions, "total: ", total_predictions)
+        # print("correct: ", correct_predictions, "total: ", total_predictions)
         return correct_predictions / total_predictions
 
 

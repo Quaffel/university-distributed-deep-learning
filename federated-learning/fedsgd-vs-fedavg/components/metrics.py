@@ -34,9 +34,6 @@ class RunResult:
             **dataclasses.asdict(self.metrics),
         }
 
-        if table_data["batch_size"] == -1:
-            table_data["batch_size"] = "\N{INFINITY}"
-
         df = DataFrame(table_data)
         df = df.rename(
             columns={
