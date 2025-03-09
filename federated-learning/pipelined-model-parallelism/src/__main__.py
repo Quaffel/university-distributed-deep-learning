@@ -1,3 +1,4 @@
+import asyncio
 import os
 from sys import argv
 
@@ -44,13 +45,23 @@ def _build_client(
 client = _build_client(rank)
 optim = Adam(client.model.parameters(), lr=8e-4)
 
-for itr in range(5_000):
-    optim.zero_grad()
-    # FORWARD PASS:
-    client.forward()
+micro_batch_size = 1
+micro_batches = 3
 
-    # BACKWARD PASS:
-    client.backward()
+async def run_training():
+    event_loop = asyncio.get_running_loop()
 
-    optim.step()
-    torch.cuda.empty_cache()
+    for batch_id in range(5_000):
+        optim.zero_grad()
+
+        job = event_loop.create_task(client.run_mini_batch(), name=f"batch {batch_id}")
+
+        await asyncio.gather(job)
+
+        optim.step()
+        torch.cuda.empty_cache()
+
+event_loop = asyncio.new_event_loop()
+
+training_job = event_loop.create_task(run_training(), name="training")
+event_loop.run_until_complete(training_job)
