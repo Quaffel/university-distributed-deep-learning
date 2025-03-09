@@ -51,17 +51,22 @@ class Rank0Client(RankClient):
 
         self._loader = build_dataset_iterator(tokenizer)
 
+        self._pending_activations: list[torch.Tensor] = []
+
     def forward(self):
         out = next(self._loader)
         out = out.to(self._device)
         out = self._model.embed(out)
 
+        self._pending_activations.append(out)
         dist.send(out.to("cpu"), 1)
 
     def backward(self):
         inp_grad = torch.empty((batch_size, seq_l, dmodel))
         dist.recv(inp_grad, 1)
-        out.backward(inp_grad.to(self._device))
+
+        activation = self._pending_activations.pop()
+        activation.backward(inp_grad.to(self._device))
 
     @property
     def model(self) -> torch.nn.Module:
@@ -79,6 +84,10 @@ class Rank1Client(RankClient):
             ctx_size=seq_l,
         )
 
+        self._pending_activations: list[torch.Tensor] = []
+        self._pending_inputs: list[torch.Tensor] = []
+
+
     def forward(self):
         inp_batch = torch.empty((batch_size, seq_l, dmodel))
         dist.recv(inp_batch, 0)
@@ -87,15 +96,22 @@ class Rank1Client(RankClient):
             inp_batch.requires_grad_()
             inp_batch.retain_grad()
 
+        self._pending_inputs.append(inp_batch)
+
         out = self._model(inp_batch)
+        self._pending_activations.append(out)
+
         dist.send(out.to("cpu"), 2)
 
     def backward(self):
         inp_grad = torch.empty((batch_size, seq_l, dmodel))
         dist.recv(inp_grad, 2)
-        
-        out.backward(inp_grad.to(self._device))
-        dist.send(inp_batch.grad.to("cpu"), 0)
+
+        activation = self._pending_activations.pop()
+        activation.backward(inp_grad.to(self._device))
+
+        input_tensor = self._pending_inputs.pop()
+        dist.send(input_tensor.grad.to("cpu"), 0)
 
     @property
     def model(self) -> torch.nn.Module:
@@ -119,6 +135,9 @@ class Rank2Client(RankClient):
 
         self._loader = build_dataset_iterator(tokenizer)
 
+        self._pending_inputs: list[torch.Tensor] = []
+
+
     def forward(self):
         target = next(self._loader)
         inp_batch = torch.empty((batch_size, seq_l, dmodel))
@@ -128,13 +147,16 @@ class Rank2Client(RankClient):
             inp_batch.requires_grad_()
             inp_batch.retain_grad()
 
+        self._pending_inputs.append(inp_batch)
+
         logits = self._model(inp_batch)
         loss = causalLLMLoss(logits, target, self._tokenizer.vocab_size)
         print(loss.item())
         loss.backward()
 
     def backward(self):
-        dist.send(inp_batch.grad.to("cpu"), 1)
+        input_tensor = self._pending_inputs.pop()
+        dist.send(input_tensor.grad.to("cpu"), 1)
 
     @property
     def model(self) -> torch.nn.Module:
