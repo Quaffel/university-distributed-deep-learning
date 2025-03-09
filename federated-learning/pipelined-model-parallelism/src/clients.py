@@ -33,10 +33,37 @@ def build_dataset_iterator(
     return iter(dataset)
 
 
-def as_asyncio_future[T](torch_future: torch.futures.Future[T]) -> asyncio.Future[T]:
-    asyncio_future = asyncio.get_running_loop().create_future()
-    torch_future.add_done_callback(lambda it: asyncio_future.set_result(it.value()))
+def as_asyncio_future(
+    torch_task: torch.distributed.Work | None,
+) -> asyncio.Future[None]:
+    if torch_task is None:
+        raise ValueError(
+            "expected value other than None "
+            "(was the operation destined at some process outside the current process group?)"
+        )
 
+    asyncio_future = asyncio.get_running_loop().create_future()
+
+    backend = torch.distributed.get_backend().title().lower()
+    if backend == "gloo":
+        # This is where the illusion of asynchrony falls apart: we don't actually yield execution
+        # to some other task but await the result of the task synchronously and return an already completed future.
+        #
+        # torch.distributed's gloo backend does not support asynchronous IO operations.
+        # It is reasonable to assume that gloo synchronizes all IO operations internally through a lock but still
+        # expose all primitives that asynchronous code may need.
+        # One such primitive are futures which allow asynchronous code to register callbacks that are called
+        # as soon as the requested IO operation completed.
+        # Unfortunately, calling 'torch.distributed.Work#get_future' when running with the gloo backend raises
+        # an error indicating that the operation is not supported.
+        # Because of this, we cannot represent the job as an asyncio future as we simply don't know when to complete it
+        # (unless we regularly check for completion through polling or we wait synchronously).
+        asyncio_future.set_result(None)
+    else:
+        torch_future = torch_task.get_future()
+        torch_future.add_done_callback(lambda it: asyncio_future.set_result(it.value()))
+
+    torch_task.wait()
     return asyncio_future
 
 
@@ -62,10 +89,10 @@ class Rank0Client(RankClient):
         out = out.to(self._device)
         out = self._model.embed(out)
 
-        await as_asyncio_future(dist.isend(out.to("cpu"), 1).get_future())
+        await as_asyncio_future(dist.isend(out.to("cpu"), 1))
 
         inp_grad = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_grad, 1).get_future())
+        await as_asyncio_future(dist.irecv(inp_grad, 1))
 
         out.backward(inp_grad.to(self._device))
 
@@ -87,7 +114,7 @@ class Rank1Client(RankClient):
 
     async def run_mini_batch(self) -> None:
         inp_batch = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_batch, 0).get_future())
+        await as_asyncio_future(dist.irecv(inp_batch, 0))
 
         with torch.no_grad():
             inp_batch = inp_batch.to(self._device)
@@ -96,10 +123,10 @@ class Rank1Client(RankClient):
 
         out = self._model(inp_batch)
 
-        await as_asyncio_future(dist.isend(out.to("cpu"), 2).get_future())
+        await as_asyncio_future(dist.isend(out.to("cpu"), 2))
 
         inp_grad = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_grad, 2).get_future())
+        await as_asyncio_future(dist.irecv(inp_grad, 2))
 
         out.backward(inp_grad.to(self._device))
 
@@ -130,8 +157,8 @@ class Rank2Client(RankClient):
     async def run_mini_batch(self) -> None:
         target = next(self._loader)
         inp_batch = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_batch, 1).get_future())
-        
+        await as_asyncio_future(dist.irecv(inp_batch, 1))
+
         with torch.no_grad():
             inp_batch = inp_batch.to(self._device)
             inp_batch.requires_grad_()
@@ -142,7 +169,7 @@ class Rank2Client(RankClient):
         print(loss.item())
         loss.backward()
 
-        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), 1).get_future())
+        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), 1))
 
     @property
     def model(self) -> torch.nn.Module:
