@@ -54,7 +54,7 @@ async def run_training():
     for batch_id in range(5_000):
         optim.zero_grad()
 
-        job = event_loop.create_task(client.run_mini_batch(), name=f"batch {batch_id}")
+        job = event_loop.create_task(client.run_mini_batch(batch_id), name=f"batch {batch_id}")
 
         await asyncio.gather(job)
 

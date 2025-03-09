@@ -12,7 +12,7 @@ from simplellm.tokenizers.abstracttokenizer import AbstractTokenizer
 
 
 class RankClient(typing.Protocol):
-    async def run_mini_batch(self) -> None: ...
+    async def run_mini_batch(self, mini_batch_id: int) -> None: ...
 
     @property
     def model(self) -> torch.nn.Module: ...
@@ -84,15 +84,15 @@ class Rank0Client(RankClient):
 
         self._loader = build_dataset_iterator(tokenizer)
 
-    async def run_mini_batch(self):
+    async def run_mini_batch(self, mini_batch_id: int):
         out = next(self._loader)
         out = out.to(self._device)
         out = self._model.embed(out)
 
-        await as_asyncio_future(dist.isend(out.to("cpu"), 1))
+        await as_asyncio_future(dist.isend(out.to("cpu"), dst=1, tag=mini_batch_id))
 
         inp_grad = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_grad, 1))
+        await as_asyncio_future(dist.irecv(inp_grad, src=1, tag=mini_batch_id))
 
         out.backward(inp_grad.to(self._device))
 
@@ -112,9 +112,9 @@ class Rank1Client(RankClient):
             ctx_size=seq_l,
         )
 
-    async def run_mini_batch(self) -> None:
+    async def run_mini_batch(self, mini_batch_id) -> None:
         inp_batch = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_batch, 0))
+        await as_asyncio_future(dist.irecv(inp_batch, src=0, tag=mini_batch_id))
 
         with torch.no_grad():
             inp_batch = inp_batch.to(self._device)
@@ -123,14 +123,14 @@ class Rank1Client(RankClient):
 
         out = self._model(inp_batch)
 
-        await as_asyncio_future(dist.isend(out.to("cpu"), 2))
+        await as_asyncio_future(dist.isend(out.to("cpu"), dst=2, tag=mini_batch_id))
 
         inp_grad = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_grad, 2))
+        await as_asyncio_future(dist.irecv(inp_grad, src=2, tag=mini_batch_id))
 
         out.backward(inp_grad.to(self._device))
 
-        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), 0))
+        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), dst=0, tag=mini_batch_id))
 
     @property
     def model(self) -> torch.nn.Module:
@@ -154,10 +154,10 @@ class Rank2Client(RankClient):
 
         self._loader = build_dataset_iterator(tokenizer)
 
-    async def run_mini_batch(self) -> None:
+    async def run_mini_batch(self, mini_batch_id: int) -> None:
         target = next(self._loader)
         inp_batch = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_batch, 1))
+        await as_asyncio_future(dist.irecv(inp_batch, src=1, tag=mini_batch_id))
 
         with torch.no_grad():
             inp_batch = inp_batch.to(self._device)
@@ -169,7 +169,7 @@ class Rank2Client(RankClient):
         print(loss.item())
         loss.backward()
 
-        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), 1))
+        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), dst=1, tag=mini_batch_id))
 
     @property
     def model(self) -> torch.nn.Module:
