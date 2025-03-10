@@ -18,7 +18,7 @@ class AbstractClient(ABC, Client):
         self.loader_train = DataLoader(
             client_data,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=False,
             drop_last=False,
             generator=self.generator,
         )

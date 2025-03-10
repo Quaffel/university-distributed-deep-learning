@@ -19,8 +19,6 @@ class AbstractServer(ABC, Server):
         self.model = model
         self.parameters = parameters
 
-        torch.manual_seed(parameters.seed)
-
     def evaluate_accuracy(self, test_loader: DataLoader) -> float:
         self.model.eval()
 
