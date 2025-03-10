@@ -12,7 +12,7 @@ from simplellm.tokenizers.abstracttokenizer import AbstractTokenizer
 
 
 class RankClient(typing.Protocol):
-    async def run_mini_batch(self, mini_batch_id: int) -> None: ...
+    async def run_mini_batch(self, micro_batch_id: int) -> None: ...
 
     @property
     def model(self) -> torch.nn.Module: ...
@@ -23,11 +23,9 @@ num_heads = 6
 total_layers_count = 6
 seq_l = 256
 
-batch_size = 3
-
 
 def build_dataset_iterator(
-    tokenizer: AbstractTokenizer,
+    tokenizer: AbstractTokenizer, batch_size: int
 ) -> typing.Iterator[torch.Tensor]:
     dataset = TinyStories(tokenizer, batch_size=batch_size, seq_l=seq_l)  # no skip
     return iter(dataset)
@@ -45,7 +43,7 @@ def as_asyncio_future(
     asyncio_future = asyncio.get_running_loop().create_future()
 
     backend = torch.distributed.get_backend().title().lower()
-    if backend == "gloo":
+    if backend == torch.distributed.Backend.GLOO:
         # This is where the illusion of asynchrony falls apart: we don't actually yield execution
         # to some other task but await the result of the task synchronously and return an already completed future.
         #
@@ -59,19 +57,20 @@ def as_asyncio_future(
         # Because of this, we cannot represent the job as an asyncio future as we simply don't know when to complete it
         # (unless we regularly check for completion through polling or we wait synchronously).
         asyncio_future.set_result(None)
+        torch_task.wait()
     else:
         torch_future = torch_task.get_future()
         torch_future.add_done_callback(lambda it: asyncio_future.set_result(it.value()))
 
-    torch_task.wait()
     return asyncio_future
 
 
 class Rank0Client(RankClient):
-    def __init__(self, device: torch.device, world_size: int):
-        tokenizer = SPTokenizer()
-
+    def __init__(self, device: torch.device, world_size: int, batch_size: int):
         self._device = device
+        self._batch_size = batch_size
+
+        tokenizer = SPTokenizer()
         self._tokenizer = tokenizer
         self._model = LLamaFirstStage(
             tokenizer.vocab_size,
@@ -82,17 +81,17 @@ class Rank0Client(RankClient):
             ctx_size=seq_l,
         )
 
-        self._loader = build_dataset_iterator(tokenizer)
+        self._loader = build_dataset_iterator(tokenizer, batch_size)
 
-    async def run_mini_batch(self, mini_batch_id: int):
+    async def run_mini_batch(self, micro_batch_id: int):
         out = next(self._loader)
         out = out.to(self._device)
         out = self._model.embed(out)
 
-        await as_asyncio_future(dist.isend(out.to("cpu"), dst=1, tag=mini_batch_id))
+        await as_asyncio_future(dist.isend(out.to("cpu"), dst=1, tag=micro_batch_id))
 
-        inp_grad = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_grad, src=1, tag=mini_batch_id))
+        inp_grad = torch.empty((self._batch_size, seq_l, dmodel))
+        await as_asyncio_future(dist.irecv(inp_grad, src=1, tag=micro_batch_id))
 
         out.backward(inp_grad.to(self._device))
 
@@ -102,8 +101,10 @@ class Rank0Client(RankClient):
 
 
 class Rank1Client(RankClient):
-    def __init__(self, device: torch.device, world_size: int) -> None:
+    def __init__(self, device: torch.device, world_size: int, batch_size: int) -> None:
         self._device = device
+        self._batch_size = batch_size
+
         self._model = LLamaStage(
             dmodel=dmodel,
             num_heads=num_heads,
@@ -112,9 +113,9 @@ class Rank1Client(RankClient):
             ctx_size=seq_l,
         )
 
-    async def run_mini_batch(self, mini_batch_id) -> None:
-        inp_batch = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_batch, src=0, tag=mini_batch_id))
+    async def run_mini_batch(self, micro_batch_id) -> None:
+        inp_batch = torch.empty((self._batch_size, seq_l, dmodel))
+        await as_asyncio_future(dist.irecv(inp_batch, src=0, tag=micro_batch_id))
 
         with torch.no_grad():
             inp_batch = inp_batch.to(self._device)
@@ -123,14 +124,16 @@ class Rank1Client(RankClient):
 
         out = self._model(inp_batch)
 
-        await as_asyncio_future(dist.isend(out.to("cpu"), dst=2, tag=mini_batch_id))
+        await as_asyncio_future(dist.isend(out.to("cpu"), dst=2, tag=micro_batch_id))
 
-        inp_grad = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_grad, src=2, tag=mini_batch_id))
+        inp_grad = torch.empty((self._batch_size, seq_l, dmodel))
+        await as_asyncio_future(dist.irecv(inp_grad, src=2, tag=micro_batch_id))
 
         out.backward(inp_grad.to(self._device))
 
-        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), dst=0, tag=mini_batch_id))
+        await as_asyncio_future(
+            dist.isend(inp_batch.grad.to("cpu"), dst=0, tag=micro_batch_id)
+        )
 
     @property
     def model(self) -> torch.nn.Module:
@@ -138,10 +141,11 @@ class Rank1Client(RankClient):
 
 
 class Rank2Client(RankClient):
-    def __init__(self, device: torch.device, world_size: int) -> None:
-        tokenizer = SPTokenizer()
-
+    def __init__(self, device: torch.device, world_size: int, batch_size: int) -> None:
         self._device = device
+        self._batch_size = batch_size
+
+        tokenizer = SPTokenizer()
         self._tokenizer = tokenizer
         self._model = LLamaLastStage(
             tokenizer.vocab_size,
@@ -152,12 +156,12 @@ class Rank2Client(RankClient):
             ctx_size=seq_l,
         )
 
-        self._loader = build_dataset_iterator(tokenizer)
+        self._loader = build_dataset_iterator(tokenizer, batch_size)
 
-    async def run_mini_batch(self, mini_batch_id: int) -> None:
+    async def run_mini_batch(self, micro_batch_id: int) -> None:
         target = next(self._loader)
-        inp_batch = torch.empty((batch_size, seq_l, dmodel))
-        await as_asyncio_future(dist.irecv(inp_batch, src=1, tag=mini_batch_id))
+        inp_batch = torch.empty((self._batch_size, seq_l, dmodel))
+        await as_asyncio_future(dist.irecv(inp_batch, src=1, tag=micro_batch_id))
 
         with torch.no_grad():
             inp_batch = inp_batch.to(self._device)
@@ -166,10 +170,13 @@ class Rank2Client(RankClient):
 
         logits = self._model(inp_batch)
         loss = causalLLMLoss(logits, target, self._tokenizer.vocab_size)
-        print(loss.item())
         loss.backward()
 
-        await as_asyncio_future(dist.isend(inp_batch.grad.to("cpu"), dst=1, tag=mini_batch_id))
+        print(f"microbatch {micro_batch_id}: loss {loss.item()}")
+
+        await as_asyncio_future(
+            dist.isend(inp_batch.grad.to("cpu"), dst=1, tag=micro_batch_id)
+        )
 
     @property
     def model(self) -> torch.nn.Module:

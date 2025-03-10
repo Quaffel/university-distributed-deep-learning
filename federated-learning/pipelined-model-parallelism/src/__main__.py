@@ -1,6 +1,7 @@
 import asyncio
 import os
 from sys import argv
+import typing
 
 import clients
 import torch
@@ -28,16 +29,19 @@ else:
 dist.init_process_group("gloo", rank=rank, world_size=world_size)
 torch.manual_seed(0)
 
+micro_batch_size = 1
+micro_batches = 3
+
 
 def _build_client(
     rank: int,
 ) -> clients.RankClient:
     if rank == 0:
-        return clients.Rank0Client(device, world_size)
+        return clients.Rank0Client(device, world_size, batch_size=micro_batch_size)
     elif rank == 1:
-        return clients.Rank1Client(device, world_size)
+        return clients.Rank1Client(device, world_size, batch_size=micro_batch_size)
     elif rank == 2:
-        return clients.Rank2Client(device, world_size)
+        return clients.Rank2Client(device, world_size, batch_size=micro_batch_size)
     else:
         raise ValueError(f"expected rank to be of value 0-2, got {rank}")
 
@@ -45,21 +49,26 @@ def _build_client(
 client = _build_client(rank)
 optim = Adam(client.model.parameters(), lr=8e-4)
 
-micro_batch_size = 1
-micro_batches = 3
 
 async def run_training():
     event_loop = asyncio.get_running_loop()
 
-    for batch_id in range(5_000):
+    def launch_micro_batch(batch: int, micro_batch: int) -> typing.Awaitable[None]:
+        micro_batch_id = batch * micro_batches + micro_batch
+
+        return event_loop.create_task(
+            client.run_mini_batch(micro_batch_id), name=f"micro batch {micro_batch_id} ({batch}-{micro_batch})"
+        )
+
+    for batch in range(5_000):
         optim.zero_grad()
 
-        job = event_loop.create_task(client.run_mini_batch(batch_id), name=f"batch {batch_id}")
-
-        await asyncio.gather(job)
+        micro_batch_tasks = [launch_micro_batch(batch, micro_batch) for micro_batch in range(micro_batches)]
+        await asyncio.gather(*micro_batch_tasks)
 
         optim.step()
         torch.cuda.empty_cache()
+
 
 event_loop = asyncio.new_event_loop()
 
