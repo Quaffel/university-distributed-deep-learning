@@ -34,12 +34,4 @@ class RunResult:
             **dataclasses.asdict(self.metrics),
         }
 
-        df = DataFrame(table_data)
-        df = df.rename(
-            columns={
-                "learning_rate": "\N{GREEK SMALL LETTER ETA}",
-                "message_count": "message_count (sum)",
-            }
-        )
-
-        return df
+        return DataFrame(table_data)
