@@ -14,14 +14,14 @@ class FedSgdGradientServer(DecentralizedServer):
     def __init__(
         self,
         device: torch.device,
-        model_builder: typing.Callable[[], torch.nn.Module],
+        model: torch.nn.Module,
         client_subsets: list[Subset],
         active_clients_fraction: float,
         learning_rate: float,
         seed: int,
     ) -> None:
         super().__init__(
-            model=model_builder(),
+            model=model,
             client_subsets=client_subsets,
             active_clients_fraction=active_clients_fraction,
             learning_rate=learning_rate,
@@ -33,7 +33,7 @@ class FedSgdGradientServer(DecentralizedServer):
             params=self.model.parameters(), lr=learning_rate
         )
         self.clients: list[GradientClient] = [
-            GradientClient(device, model_builder(), subset) for subset in client_subsets
+            GradientClient(device, model, subset) for subset in client_subsets
         ]
         self.client_datasets = client_subsets
 

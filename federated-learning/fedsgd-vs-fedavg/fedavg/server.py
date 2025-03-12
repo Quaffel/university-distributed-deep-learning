@@ -14,7 +14,7 @@ class FedAvgServer(DecentralizedServer):
     def __init__(
         self,
         device: torch.device,
-        model_builder: typing.Callable[[], torch.nn.Module],
+        model: torch.nn.Module,
         learning_rate: float,
         batch_size: int,
         client_subsets: list[Subset],
@@ -23,7 +23,7 @@ class FedAvgServer(DecentralizedServer):
         seed: int,
     ) -> None:
         super().__init__(
-            model_builder(),
+            model,
             client_subsets,
             client_fraction,
             learning_rate,
@@ -34,7 +34,7 @@ class FedAvgServer(DecentralizedServer):
         self.local_epochs_count = local_epochs
         self.clients = [
             WeightClient(
-                device, model_builder(), subset, learning_rate, batch_size, local_epochs
+                device, model, subset, learning_rate, batch_size, local_epochs
             )
             for subset in client_subsets
         ]
