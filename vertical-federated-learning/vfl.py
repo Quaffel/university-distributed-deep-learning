@@ -5,7 +5,32 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.utils.data import random_split
 from sklearn.preprocessing import MinMaxScaler
+
+
+from torch import nn
+
+# L_p normalization, maps every component to range from 0 to 1
+# nn.functional.normalize()
+
+# MinMaxScaler (makes significant difference as to how negative values are scaled)
+# X_std = (X - X.min(axis=0)) / (X.max(axis=0) - X.min(axis=0))
+# X_scaled = X_std * (max - min) + min
+
+
+# import torch
+#
+# def scale_to_minus_one_to_one(tensor, min_val, max_val):
+#     return 2 * (tensor - min_val) / (max_val - min_val) - 1
+#
+# # Example usage
+# features = torch.tensor([[-5.0, 0.0, 10.0], [2.0, -3.0, 7.0]])
+# min_vals = features.min(dim=0).values  # Minimum value for each feature
+# max_vals = features.max(dim=0).values  # Maximum value for each feature
+#
+# normalized_features = scale_to_minus_one_to_one(features, min_vals, max_vals)
+# print(normalized_features)
 
 
 class BottomModel(nn.Module):
@@ -25,7 +50,9 @@ class BottomModel(nn.Module):
 class TopModel(nn.Module):
     def __init__(self, local_models, n_outs):
         super(TopModel, self).__init__()
-        self.in_size = sum([local_models[i].local_out_dim for i in range(len(local_models))])
+        self.in_size = sum(
+            [local_models[i].local_out_dim for i in range(len(local_models))]
+        )
         self.fc1 = nn.Linear(self.in_size, 128)
         self.fc2 = nn.Linear(128, 256)
         self.fc3 = nn.Linear(256, 2)
@@ -33,31 +60,40 @@ class TopModel(nn.Module):
         self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
-        concat_outs = torch.cat(x, dim=1)  # concatenate local model outputs before forward pass
+        concat_outs = torch.cat(
+            x, dim=1
+        )  # concatenate local model outputs before forward pass
         x = self.act(self.fc1(concat_outs))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
         return self.dropout(x)
 
 
-class VFLNetwork(nn.Module):
+class AggregationModel(nn.Module):
     def __init__(self, local_models, n_outs):
-        super(VFLNetwork, self).__init__()
-        self.num_cli = None  # the number of clients
-        self.cli_features = None  # the set of features corresponding to a client
+        super(AggregationModel, self).__init__()
+        self.clients_count = None
+        self.clients_features = None
         self.bottom_models = local_models
         self.top_model = TopModel(self.bottom_models, n_outs)
+
+        # TODO: Difference to Adam?
         self.optimizer = optim.AdamW(self.parameters())
         self.criterion = nn.CrossEntropyLoss()
 
-    def train_with_settings(self, epochs, batch_sz, n_cli, cli_features, x, y):
-        self.num_cli = n_cli  
-        self.cli_features = cli_features  
-        x = x.astype('float32')
-        y = y.astype('float32')
-        x_train = [torch.tensor(x[feats].values) for feats in cli_features]
+    def train_with_settings(
+        self, epochs: int, batch_size: int, clients_count: int, clients_features, x, y
+    ):
+        self.clients_count = clients_count
+        self.clients_features = clients_features
+        x_train = [torch.tensor(x[features].values) for features in clients_features]
         y_train = torch.tensor(y.values)
-        num_batches = len(x) // batch_sz if len(x) % batch_sz == 0 else len(x) // batch_sz + 1
+        num_batches = (
+            len(x) // batch_size
+            if len(x) % batch_size == 0
+            else len(x) // batch_size + 1
+        )
+
         for epoch in range(epochs):
             self.optimizer.zero_grad()
             total_loss = 0.0
@@ -65,11 +101,20 @@ class VFLNetwork(nn.Module):
             total = 0.0
             for minibatch in range(num_batches):
                 if minibatch == num_batches - 1:
-                    x_minibatch = [x[int(minibatch * batch_sz):] for x in x_train]
-                    y_minibatch = y_train[int(minibatch * batch_sz):]
+                    x_minibatch = [x[int(minibatch * batch_size) :] for x in x_train]
+                    y_minibatch = y_train[int(minibatch * batch_size) :]
                 else:
-                    x_minibatch = [x[int(minibatch * batch_sz):int((minibatch + 1) * batch_sz)] for x in x_train]
-                    y_minibatch = y_train[int(minibatch * batch_sz):int((minibatch + 1) * batch_sz)]
+                    x_minibatch = [
+                        x[
+                            int(minibatch * batch_size) : int(
+                                (minibatch + 1) * batch_size
+                            )
+                        ]
+                        for x in x_train
+                    ]
+                    y_minibatch = y_train[
+                        int(minibatch * batch_size) : int((minibatch + 1) * batch_size)
+                    ]
 
                 outs = self.forward(x_minibatch)
                 pred = torch.argmax(outs, dim=1)
@@ -82,17 +127,19 @@ class VFLNetwork(nn.Module):
                 self.optimizer.step()
 
             print(
-                f"Epoch: {epoch} Train accuracy: {correct * 100 / total:.2f}% Loss: {total_loss.detach().numpy()/num_batches:.3f}")
+                f"Epoch: {epoch} Train accuracy: {correct * 100 / total:.2f}% Loss: {total_loss.detach().numpy()/num_batches:.3f}"
+            )
 
     def forward(self, x):
-        local_outs = [self.bottom_models[i](x[i]) for i in range(len(self.bottom_models))]
+        local_outs = [
+            self.bottom_models[i](x[i]) for i in range(len(self.bottom_models))
+        ]
         return self.top_model(local_outs)
 
     def test(self, x, y):
-        x = x.astype('float32')
-        y = y.astype('float32')
-        x_test = [torch.tensor(x[feats].values) for feats in self.cli_features]
+        x_test = [torch.tensor(x[feats].values) for feats in self.clients_features]
         y_test = torch.tensor(y.values)
+
         with torch.no_grad():
             outs = self.forward(x_test)
             preds = torch.argmax(outs, dim=1)
@@ -105,56 +152,99 @@ class VFLNetwork(nn.Module):
 if __name__ == "__main__":
     torch.manual_seed(42)
     np.random.seed(42)
-    df = pd.read_csv("../tutorial_2a/heart.csv")
-    categorical_cols = ['sex', 'cp', 'fbs', 'restecg', 'exang', 'slope', 'ca', 'thal']
-    numerical_cols = ['age', 'trestbps', 'chol', 'thalach', 'oldpeak']
-    df[numerical_cols] = MinMaxScaler().fit_transform(df[numerical_cols])  # scale numerical features for effective learning
-    encoded_df = pd.get_dummies(df, columns=categorical_cols)  #convert categorical features to one-hot embeddings
+
+    df = pd.read_csv("../datasets/heart/dataset.csv", dtype=np.float32)
+    categorical_cols = ["sex", "cp", "fbs", "restecg", "exang", "slope", "ca", "thal"]
+    numerical_cols = ["age", "trestbps", "chol", "thalach", "oldpeak"]
+
+    # scale numerical features for effective learning
+    df[numerical_cols] = MinMaxScaler().fit_transform(df[numerical_cols])
+
+    # convert categorical features to one-hot embeddings
+    # returns boolean columns, convert them into float32 columns
+    encoded_df = pd.get_dummies(df, columns=categorical_cols).astype("float32")
     num_clients = 4
+
     X = encoded_df.drop("target", axis=1)
-    Y = pd.get_dummies(encoded_df[['target']], columns=['target'])
-    features_per_client = (num_clients - 1) * [(len(df.columns) - 1) // num_clients]  # "equally" partition the features
-    features_per_client.append(len(df.columns) - 1 - sum(features_per_client))
-    features_per_client = np.array(features_per_client)
+
+    # TODO: How does selection of target columns work?
+    # returns boolean columns, convert them into float32 columns
+    Y = pd.get_dummies(encoded_df[["target"]], columns=["target"]).astype("float32")
+
+    # "equally" partition the features
+    feature_count_per_client: list[int] = (num_clients - 1) * [
+        (len(df.columns) - 1) // num_clients
+    ]
+    feature_count_per_client.append(len(df.columns) - 1 - sum(feature_count_per_client))
+    feature_count_per_client = np.array(feature_count_per_client)
+
     all_feature_names = list(df.columns)
     all_feature_names.pop()
-    client_feature_names = []
-    csum_features_per_client = np.cumsum(features_per_client)
+    feature_names_per_client: list[list[str]] = []
+
+    # sums up all elements in list; every element is mapped to sum up until that point
     encoded_df_feature_names = list(X.columns)
     start_index = 0
-    end_index = 0
-    for num_feats in features_per_client:
-        feat_names = all_feature_names[start_index:start_index + num_feats]
-        client_feature_names.append(feat_names)
-        start_index = start_index + num_feats
+    for client_feature_count in feature_count_per_client:
+        client_feature_names = all_feature_names[
+            start_index : start_index + client_feature_count
+        ]
+        feature_names_per_client.append(client_feature_names)
+        start_index = start_index + client_feature_count
 
-    for i in range(len(client_feature_names)):
+    # insert names for columns created for one-hot encoding
+    for i in range(len(feature_names_per_client)):
         updated_names = []
-        for column_name in client_feature_names[i]:
+        for column_name in feature_names_per_client[i]:
             if column_name not in categorical_cols:
+                # leave as-is
                 updated_names.append(column_name)
-            else:
-                for name in encoded_df_feature_names:
-                    if '_' in name and column_name in name:
-                        updated_names.append(name)
+                continue
 
-        client_feature_names[i] = updated_names
+            for name in encoded_df_feature_names:
+                if "_" in name and column_name in name:
+                    updated_names.append(name)
+
+        feature_names_per_client[i] = updated_names
 
     # model architecture hyperparameters
-    outs_per_client = 2
-    bottom_models = [BottomModel(len(in_feats), outs_per_client * len(in_feats)) for in_feats in client_feature_names]
-    final_out_dims = 2
-    Network = VFLNetwork(bottom_models, final_out_dims)
 
-    #Training configurations
+    # does not have directly interpretable meaning ("latent space")
+    client_outputs_per_feature = 2
+    bottom_models = [
+        # TODO: why are outputs multiplied by number of input features?
+        BottomModel(
+            len(input_dimension), client_outputs_per_feature * len(input_dimension)
+        )
+        for input_dimension in feature_names_per_client
+    ]
+
+    output_dimension = 2
+    model = AggregationModel(bottom_models, output_dimension)
+
+    # Training configurations
     EPOCHS = 300
     BATCH_SIZE = 64
     TRAIN_TEST_THRESH = 0.8
-    X_train, X_test = X.loc[:int(TRAIN_TEST_THRESH * len(X))], X.loc[int(TRAIN_TEST_THRESH * len(X)) + 1:]
-    Y_train, Y_test = Y.loc[:int(TRAIN_TEST_THRESH * len(Y))], Y.loc[int(TRAIN_TEST_THRESH * len(Y)) + 1:]
-    Network.train_with_settings(EPOCHS, BATCH_SIZE, num_clients,
-                                client_feature_names, X_train, Y_train)
 
-    
-    accuracy, loss = Network.test(X_test, Y_test)
+    # train-test-split
+    X_train, X_test = (
+        X.loc[: int(TRAIN_TEST_THRESH * len(X))],
+        X.loc[int(TRAIN_TEST_THRESH * len(X)) + 1 :],
+    )
+    Y_train, Y_test = (
+        Y.loc[: int(TRAIN_TEST_THRESH * len(Y))],
+        Y.loc[int(TRAIN_TEST_THRESH * len(Y)) + 1 :],
+    )
+
+    model.train_with_settings(
+        EPOCHS,
+        BATCH_SIZE,
+        num_clients,
+        feature_names_per_client,
+        X_train,
+        Y_train,
+    )
+
+    accuracy, loss = model.test(X_test, Y_test)
     print(f"Test accuracy: {accuracy * 100:.2f}%")
