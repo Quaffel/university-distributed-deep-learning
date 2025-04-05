@@ -26,7 +26,7 @@ class Autoencoder(nn.Module):
         self,
         input_dimensions,
         wide_hidden_dimensions=50,
-        dense_hidden_dimensions=12,
+        narrow_hidden_dimensions=12,
         latent_dimensions=3,
     ):
         super(Autoencoder, self).__init__()
@@ -38,17 +38,17 @@ class Autoencoder(nn.Module):
                 nn.ReLU(),
             ),
             nn.Sequential(
-                nn.Linear(wide_hidden_dimensions, dense_hidden_dimensions),
-                nn.BatchNorm1d(num_features=dense_hidden_dimensions),
+                nn.Linear(wide_hidden_dimensions, narrow_hidden_dimensions),
+                nn.BatchNorm1d(num_features=narrow_hidden_dimensions),
                 nn.ReLU(),
             ),
             nn.Sequential(
-                nn.Linear(dense_hidden_dimensions, dense_hidden_dimensions),
-                nn.BatchNorm1d(num_features=dense_hidden_dimensions),
+                nn.Linear(narrow_hidden_dimensions, narrow_hidden_dimensions),
+                nn.BatchNorm1d(num_features=narrow_hidden_dimensions),
                 nn.ReLU(),
             ),
             nn.Sequential(
-                nn.Linear(dense_hidden_dimensions, latent_dimensions),
+                nn.Linear(narrow_hidden_dimensions, latent_dimensions),
                 nn.BatchNorm1d(num_features=latent_dimensions),
                 nn.ReLU(),
             ),
@@ -64,17 +64,17 @@ class Autoencoder(nn.Module):
                 nn.ReLU(),
             ),
             nn.Sequential(
-                nn.Linear(latent_dimensions, dense_hidden_dimensions),
-                nn.BatchNorm1d(dense_hidden_dimensions),
+                nn.Linear(latent_dimensions, narrow_hidden_dimensions),
+                nn.BatchNorm1d(narrow_hidden_dimensions),
                 nn.ReLU(),
             ),
             nn.Sequential(
-                nn.Linear(dense_hidden_dimensions, dense_hidden_dimensions),
-                nn.BatchNorm1d(num_features=dense_hidden_dimensions),
+                nn.Linear(narrow_hidden_dimensions, narrow_hidden_dimensions),
+                nn.BatchNorm1d(num_features=narrow_hidden_dimensions),
                 nn.ReLU(),
             ),
             nn.Sequential(
-                nn.Linear(dense_hidden_dimensions, wide_hidden_dimensions),
+                nn.Linear(narrow_hidden_dimensions, wide_hidden_dimensions),
                 nn.BatchNorm1d(num_features=wide_hidden_dimensions),
                 nn.ReLU(),
             ),
@@ -160,7 +160,7 @@ class Autoencoder(nn.Module):
         return pred
 
 
-class customLoss(nn.Module):
+class MseKldLoss(nn.Module):
     def __init__(self):
         super().__init__()
         self._mse_loss = nn.MSELoss(reduction="sum")
@@ -190,17 +190,18 @@ if __name__ == "__main__":
     X_test = torch.tensor(X_test).float()
     y_train = torch.tensor(y_train.values).long()
     y_test = torch.tensor(y_test.values).long()
-    D_in = X.shape[1] + 1
-    H = 48
-    H2 = 32
-    latent_dim = 16
-    model = Autoencoder(D_in, H, H2, latent_dim)
+    model = Autoencoder(
+        input_dimensions=X.shape[1] + 1,  # why +1?
+        wide_hidden_dimensions=48,
+        narrow_hidden_dimensions=32,
+        latent_dimensions=16,
+    )
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    loss_mse_kld = customLoss()
+    loss_function = MseKldLoss()
     real_data = torch.concat((X_train, y_train.view(-1, 1)), dim=1)
     EPOCHS = 200
     BATCH_SIZE = 64
-    model.train_with_settings(EPOCHS, BATCH_SIZE, real_data, optimizer, loss_mse_kld)
+    model.train_with_settings(EPOCHS, BATCH_SIZE, real_data, optimizer, loss_function)
 
     _, mu, logvar = model.forward(real_data)
 
