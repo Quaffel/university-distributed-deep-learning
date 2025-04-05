@@ -1,15 +1,13 @@
-from pathlib import Path
+import typing
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import random_split
 from sklearn.preprocessing import MinMaxScaler
-
-
 from torch import nn
+from tqdm import tqdm
 
 # L_p normalization, maps every component to range from 0 to 1
 # nn.functional.normalize()
@@ -70,35 +68,42 @@ class TopModel(nn.Module):
 
 
 class AggregationModel(nn.Module):
-    def __init__(self, local_models, n_outs):
+    def __init__(
+        self,
+        local_models: list[nn.Module],
+        output_dimension: int,
+    ):
         super(AggregationModel, self).__init__()
-        self.clients_count = None
-        self.clients_features = None
-        self.bottom_models = local_models
-        self.top_model = TopModel(self.bottom_models, n_outs)
+        self._bottom_models = local_models
+        self._top_model = TopModel(self._bottom_models, output_dimension)
 
         # TODO: Difference to Adam?
-        self.optimizer = optim.AdamW(self.parameters())
-        self.criterion = nn.CrossEntropyLoss()
+        self._optimizer = optim.AdamW(self.parameters())
+        self._criterion = nn.CrossEntropyLoss()
 
     def train_with_settings(
-        self, epochs: int, batch_size: int, clients_count: int, clients_features, x, y
+        self,
+        epochs: int,
+        batch_size: int,
+        client_datasets: list[torch.Tensor],
+        dataset_targets: torch.Tensor,
     ):
-        self.clients_count = clients_count
-        self.clients_features = clients_features
-        x_train = [torch.tensor(x[features].values) for features in clients_features]
-        y_train = torch.tensor(y.values)
+        x_train = client_datasets
+        y_train = dataset_targets
+
+        dataset_size = y_train.shape[0]
         num_batches = (
-            len(x) // batch_size
-            if len(x) % batch_size == 0
-            else len(x) // batch_size + 1
+            dataset_size // batch_size
+            if dataset_size % batch_size == 0
+            else dataset_size // batch_size + 1
         )
 
         for epoch in range(epochs):
-            self.optimizer.zero_grad()
+            self._optimizer.zero_grad()
             total_loss = 0.0
             correct = 0.0
             total = 0.0
+
             for minibatch in range(num_batches):
                 if minibatch == num_batches - 1:
                     x_minibatch = [x[int(minibatch * batch_size) :] for x in x_train]
@@ -121,130 +126,195 @@ class AggregationModel(nn.Module):
                 actual = torch.argmax(y_minibatch, dim=1)
                 correct += torch.sum((pred == actual))
                 total += len(actual)
-                loss = self.criterion(outs, y_minibatch)
+                loss = self._criterion(outs, y_minibatch)
                 total_loss += loss
                 loss.backward()
-                self.optimizer.step()
+                self._optimizer.step()
 
             print(
                 f"Epoch: {epoch} Train accuracy: {correct * 100 / total:.2f}% Loss: {total_loss.detach().numpy()/num_batches:.3f}"
             )
 
-    def forward(self, x):
-        local_outs = [
-            self.bottom_models[i](x[i]) for i in range(len(self.bottom_models))
+    def forward(self, client_inputs: list[torch.Tensor]):
+        local_outputs = [
+            bottom_model(client_input)
+            for bottom_model, client_input in zip(self._bottom_models, client_inputs)
         ]
-        return self.top_model(local_outs)
 
-    def test(self, x, y):
-        x_test = [torch.tensor(x[feats].values) for feats in self.clients_features]
-        y_test = torch.tensor(y.values)
+        return self._top_model(local_outputs)
+
+    def test(
+        self,
+        client_datasets: list[torch.Tensor],
+        dataset_targets: torch.Tensor,
+    ) -> tuple[float, float]:
+        x_test = client_datasets
+        y_test = dataset_targets
+        dataset_size = y_test.shape[0]
 
         with torch.no_grad():
             outs = self.forward(x_test)
             preds = torch.argmax(outs, dim=1)
             actual = torch.argmax(y_test, dim=1)
-            accuracy = torch.sum((preds == actual)) / len(actual)
-            loss = self.criterion(outs, y_test)
+            accuracy = torch.sum((preds == actual)).div(dataset_size).item()
+            loss = self._criterion(outs, y_test)
             return accuracy, loss
 
 
-if __name__ == "__main__":
+def load_dataset(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, dtype=np.float32)
+
+
+def partition_elements_uniformly(
+    elements: list[str], partitions: int
+) -> list[list[str]]:
+    def generate_partitions():
+        if partitions < 1:
+            raise ValueError(f"expected at least one partition, got {partitions}")
+
+        partition_size = len(elements) // partitions
+
+        partition_start_idx = 0
+        for _ in range(partitions - 1):
+            partition_end_idx = partition_start_idx + partition_size
+            yield elements[partition_start_idx:partition_end_idx]
+
+            partition_start_idx = partition_end_idx
+
+        yield elements[partition_start_idx:]
+
+    return list(generate_partitions())
+
+
+def partition_frame(
+    frame: pd.DataFrame, split: float
+) -> typing.Tuple[pd.DataFrame, pd.DataFrame]:
+    if not (0 <= split <= 1):
+        raise ValueError(f"expect split to be a fraction of one, got {split}")
+
+    pivot_element_idx = int(split * len(frame))
+
+    return (
+        frame.loc[:pivot_element_idx],
+        frame.loc[pivot_element_idx:],
+    )
+
+
+features: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
+    "sex": "categorical",
+    "cp": "categorical",
+    "fbs": "categorical",
+    "restecg": "categorical",
+    "exang": "categorical",
+    "slope": "categorical",
+    "ca": "categorical",
+    "thal": "categorical",
+    "age": "numerical",
+    "trestbps": "numerical",
+    "chol": "numerical",
+    "thalach": "numerical",
+    "oldpeak": "numerical",
+}
+
+
+def encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
+    return pd.DataFrame(
+        MinMaxScaler().fit_transform(pd.DataFrame(feature)), columns=[feature.name],
+        index=feature.index
+    )
+
+
+def encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
+    return pd.get_dummies(pd.DataFrame(feature), columns=[feature.name]).astype(
+        "float32"
+    )
+
+
+def encode_feature(feature: pd.Series) -> pd.DataFrame:
+    feature_name = feature.name
+    if type(feature_name) != str:
+        raise ValueError(
+            f"name of feature series must be string, got {type(feature_name)}"
+        )
+
+    match features.get(feature_name, None):
+        case "categorical":
+            return encode_categorical_feature(feature)
+        case "numerical":
+            return encode_numerical_feature(feature)
+        case None:
+            raise ValueError(f"encountered unrecognized feature '{feature_name}'")
+
+
+def build_client_dataset(
+    dataset: pd.DataFrame, client_feature_names: list[str]
+) -> pd.DataFrame:
+    def preprocess_feature(feature_name: str) -> pd.DataFrame:
+        feature: pd.Series = dataset[feature_name]
+        return encode_feature(feature)
+
+    encoded_client_features = [preprocess_feature(it) for it in client_feature_names]
+    return pd.concat(encoded_client_features, axis=1, ignore_index=True)
+
+
+def build_client_datasets(
+    dataset: pd.DataFrame, client_feature_name_mapping: list[list[str]]
+) -> typing.Tuple[list[torch.Tensor], torch.Tensor]:
+    x_train = [
+        torch.tensor(build_client_dataset(dataset, client_features).values)
+        for client_features in client_feature_name_mapping
+    ]
+
+    y_train = torch.tensor(encode_categorical_feature(dataset["target"]).values)
+
+    return x_train, y_train
+
+
+def main(
+    *,
+    clients: int = 4,
+    client_output_dimensions_per_feature=2,
+    output_dimensions: int = 2,
+    epochs: int = 300,
+    batch_size: int = 64,
+    train_test_split: float = 0.8,
+):
     torch.manual_seed(42)
     np.random.seed(42)
 
-    df = pd.read_csv("../datasets/heart/dataset.csv", dtype=np.float32)
-    categorical_cols = ["sex", "cp", "fbs", "restecg", "exang", "slope", "ca", "thal"]
-    numerical_cols = ["age", "trestbps", "chol", "thalach", "oldpeak"]
+    dataset = load_dataset("../datasets/heart/dataset.csv")
+    dataset_train, dataset_test = partition_frame(dataset, train_test_split)
 
-    # scale numerical features for effective learning
-    df[numerical_cols] = MinMaxScaler().fit_transform(df[numerical_cols])
+    client_feature_name_mapping: list[list[str]] = partition_elements_uniformly(
+        list(features.keys()), clients
+    )
 
-    # convert categorical features to one-hot embeddings
-    # returns boolean columns, convert them into float32 columns
-    encoded_df = pd.get_dummies(df, columns=categorical_cols).astype("float32")
-    num_clients = 4
+    # model setup and training
+    client_datasets_train, dataset_train_targets = build_client_datasets(
+        dataset_train, client_feature_name_mapping
+    )
 
-    X = encoded_df.drop("target", axis=1)
-
-    # TODO: How does selection of target columns work?
-    # returns boolean columns, convert them into float32 columns
-    Y = pd.get_dummies(encoded_df[["target"]], columns=["target"]).astype("float32")
-
-    # "equally" partition the features
-    feature_count_per_client: list[int] = (num_clients - 1) * [
-        (len(df.columns) - 1) // num_clients
-    ]
-    feature_count_per_client.append(len(df.columns) - 1 - sum(feature_count_per_client))
-    feature_count_per_client = np.array(feature_count_per_client)
-
-    all_feature_names = list(df.columns)
-    all_feature_names.pop()
-    feature_names_per_client: list[list[str]] = []
-
-    # sums up all elements in list; every element is mapped to sum up until that point
-    encoded_df_feature_names = list(X.columns)
-    start_index = 0
-    for client_feature_count in feature_count_per_client:
-        client_feature_names = all_feature_names[
-            start_index : start_index + client_feature_count
-        ]
-        feature_names_per_client.append(client_feature_names)
-        start_index = start_index + client_feature_count
-
-    # insert names for columns created for one-hot encoding
-    for i in range(len(feature_names_per_client)):
-        updated_names = []
-        for column_name in feature_names_per_client[i]:
-            if column_name not in categorical_cols:
-                # leave as-is
-                updated_names.append(column_name)
-                continue
-
-            for name in encoded_df_feature_names:
-                if "_" in name and column_name in name:
-                    updated_names.append(name)
-
-        feature_names_per_client[i] = updated_names
-
-    # model architecture hyperparameters
-
-    # does not have directly interpretable meaning ("latent space")
-    client_outputs_per_feature = 2
-    bottom_models = [
-        # TODO: why are outputs multiplied by number of input features?
+    bottom_models: list[nn.Module] = [
         BottomModel(
-            len(input_dimension), client_outputs_per_feature * len(input_dimension)
+            client_dataset.shape[1],
+            client_output_dimensions_per_feature * client_dataset.shape[1],
         )
-        for input_dimension in feature_names_per_client
+        for client_dataset in client_datasets_train
     ]
 
-    output_dimension = 2
-    model = AggregationModel(bottom_models, output_dimension)
-
-    # Training configurations
-    EPOCHS = 300
-    BATCH_SIZE = 64
-    TRAIN_TEST_THRESH = 0.8
-
-    # train-test-split
-    X_train, X_test = (
-        X.loc[: int(TRAIN_TEST_THRESH * len(X))],
-        X.loc[int(TRAIN_TEST_THRESH * len(X)) + 1 :],
-    )
-    Y_train, Y_test = (
-        Y.loc[: int(TRAIN_TEST_THRESH * len(Y))],
-        Y.loc[int(TRAIN_TEST_THRESH * len(Y)) + 1 :],
-    )
+    model = AggregationModel(bottom_models, output_dimensions)
 
     model.train_with_settings(
-        EPOCHS,
-        BATCH_SIZE,
-        num_clients,
-        feature_names_per_client,
-        X_train,
-        Y_train,
+        epochs, batch_size, client_datasets_train, dataset_train_targets
     )
 
-    accuracy, loss = model.test(X_test, Y_test)
-    print(f"Test accuracy: {accuracy * 100:.2f}%")
+    # testing
+    client_datasets_test, dataset_test_targets = build_client_datasets(
+        dataset_test, client_feature_name_mapping
+    )
+    accuracy, loss = model.test(client_datasets_test, dataset_test_targets)
+    print(f"Test accuracy: {accuracy * 100:.2f}%, test loss: {loss:.3f}")
+
+
+if __name__ == "__main__":
+    main()
