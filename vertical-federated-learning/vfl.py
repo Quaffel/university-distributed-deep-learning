@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -32,39 +33,44 @@ from tqdm import tqdm
 
 
 class BottomModel(nn.Module):
-    def __init__(self, in_feat, out_feat):
+    def __init__(self, input_dimensions, output_dimensions):
         super(BottomModel, self).__init__()
-        self.local_out_dim = out_feat
-        self.fc1 = nn.Linear(in_feat, out_feat)
-        self.fc2 = nn.Linear(out_feat, out_feat)
-        self.act = nn.ReLU()
-        self.dropout = nn.Dropout(0.1)
+
+        self._output_dimensions = output_dimensions
+
+        self.layer = nn.Sequential(
+            nn.Sequential(nn.Linear(input_dimensions, output_dimensions), nn.ReLU()),
+            nn.Sequential(
+                nn.Linear(output_dimensions, output_dimensions), nn.ReLU(), nn.ReLU()
+            ),
+            nn.Dropout(0.1),
+        )
 
     def forward(self, x):
-        x = self.act(self.fc1(x))
-        return self.dropout(self.act(self.fc2(x)))
+        return self.layer(x)
+
+    @property
+    def output_dimensions(self) -> int:
+        return self._output_dimensions
 
 
 class TopModel(nn.Module):
     def __init__(self, local_models, n_outs):
         super(TopModel, self).__init__()
-        self.in_size = sum(
-            [local_models[i].local_out_dim for i in range(len(local_models))]
+
+        input_dimensions = sum(it.output_dimensions for it in local_models)
+        self.layer = nn.Sequential(
+            nn.Sequential(nn.Linear(input_dimensions, 128), nn.LeakyReLU()),
+            nn.Sequential(nn.Linear(128, 256), nn.LeakyReLU()),
+            nn.Sequential(nn.Linear(256, 2), nn.LeakyReLU()),
+            nn.Dropout(0.1),
         )
-        self.fc1 = nn.Linear(self.in_size, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 2)
-        self.act = nn.LeakyReLU()
-        self.dropout = nn.Dropout(0.1)
 
     def forward(self, x):
-        concat_outs = torch.cat(
-            x, dim=1
-        )  # concatenate local model outputs before forward pass
-        x = self.act(self.fc1(concat_outs))
-        x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
-        return self.dropout(x)
+        # concatenate local model outputs before forward pass
+        concat_outs = torch.concat(x, dim=1)
+
+        return self.layer(concat_outs)
 
 
 class AggregationModel(nn.Module):
@@ -164,40 +170,18 @@ class AggregationModel(nn.Module):
             return accuracy, loss
 
 
-def build_client_datasets(
-    dataset: pd.DataFrame,
-    client_feature_name_mapping: list[list[str]],
-    train_test_split: float,
-) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    client_datasets = [
-        preprocessing.encode_dataset(dataset[client_features])
-        for client_features in client_feature_name_mapping
-    ]
-
-    client_datasets_train, client_datasets_test = zip(
-        *[
-            partitions.partition_frame(client_dataset, train_test_split)
-            for client_dataset in client_datasets
-        ]
-    )
-
-    client_datasets_train = list(client_datasets_train)
-    client_datasets_test = list(client_datasets_test)
-
-    return (
-        list(map(preprocessing.as_tensor, client_datasets_train)),
-        list(map(preprocessing.as_tensor, client_datasets_test)),
+def _encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
+    return pd.DataFrame(
+        MinMaxScaler().fit_transform(pd.DataFrame(feature)),
+        columns=[feature.name],
+        index=feature.index,
     )
 
 
-def build_target_dataset(
-    dataset: pd.DataFrame, train_test_split: float
-) -> tuple[torch.Tensor, torch.Tensor]:
-    target = preprocessing._encode_feature(dataset["target"])
-
-    target_train, target_test = partitions.partition_frame(target, train_test_split)
-
-    return preprocessing.as_tensor(target_train), preprocessing.as_tensor(target_test)
+def _encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
+    return pd.get_dummies(pd.DataFrame(feature), columns=[feature.name]).astype(
+        "float32"
+    )
 
 
 def main(
@@ -222,12 +206,19 @@ def main(
         )
     )
 
-    client_datasets_train, client_datasets_test = build_client_datasets(
-        dataset, client_feature_name_mapping, train_test_split
+    client_datasets_train, client_datasets_test = preprocessing.build_client_datasets(
+        dataset,
+        client_feature_name_mapping,
+        train_test_split,
+        categorical_encoder=_encode_categorical_feature,
+        numerical_encoder=_encode_numerical_feature,
     )
 
-    dataset_target_train, dataset_target_test = build_target_dataset(
-        dataset, train_test_split
+    dataset_target_train, dataset_target_test = preprocessing.build_target_dataset(
+        dataset,
+        train_test_split,
+        categorical_encoder=_encode_categorical_feature,
+        numerical_encoder=_encode_numerical_feature,
     )
 
     # model setup and training
@@ -241,7 +232,9 @@ def main(
 
     model = AggregationModel(bottom_models, output_dimensions)
 
-    model.train_with_settings(epochs, batch_size, client_datasets_train, dataset_target_train)
+    model.train_with_settings(
+        epochs, batch_size, client_datasets_train, dataset_target_train
+    )
 
     # testing
     accuracy, loss = model.test(client_datasets_test, dataset_target_test)

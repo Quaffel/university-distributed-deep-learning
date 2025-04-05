@@ -1,5 +1,5 @@
-from pathlib import Path
 import typing
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -38,21 +38,16 @@ def load_dataset(path: Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=np.float32)
 
 
-def _encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.DataFrame(
-        MinMaxScaler().fit_transform(pd.DataFrame(feature)),
-        columns=[feature.name],
-        index=feature.index,
-    )
+class EncodingFunction(typing.Protocol):
+    def __call__(self, feature: pd.Series) -> pd.DataFrame: ...
 
 
-def _encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.get_dummies(pd.DataFrame(feature), columns=[feature.name]).astype(
-        "float32"
-    )
-
-
-def _encode_feature(feature: pd.Series) -> pd.DataFrame:
+def encode_feature(
+    feature: pd.Series,
+    *,
+    categorical_encoder: EncodingFunction,
+    numerical_encoder: EncodingFunction,
+) -> pd.DataFrame:
     feature_name = feature.name
     if type(feature_name) != str:
         raise ValueError(
@@ -61,24 +56,98 @@ def _encode_feature(feature: pd.Series) -> pd.DataFrame:
 
     match _columns.get(feature_name, None):
         case "categorical":
-            return _encode_categorical_feature(feature)
+            return categorical_encoder(feature)
         case "numerical":
-            return _encode_numerical_feature(feature)
+            return numerical_encoder(feature)
         case None:
             raise ValueError(f"encountered unrecognized feature '{feature_name}'")
 
 
-def encode_dataset(dataset: pd.DataFrame) -> pd.DataFrame:
+def encode_dataset(
+    dataset: pd.DataFrame,
+    *,
+    categorical_encoder: EncodingFunction,
+    numerical_encoder: EncodingFunction,
+) -> pd.DataFrame:
     def preprocess_feature(feature_name: str) -> pd.DataFrame:
         feature: pd.Series = dataset[feature_name]
-        return _encode_feature(feature)
+        return encode_feature(
+            feature,
+            categorical_encoder=categorical_encoder,
+            numerical_encoder=numerical_encoder,
+        )
 
     encoded_client_features = [preprocess_feature(it) for it in dataset.columns]
     return pd.concat(encoded_client_features, axis=1)
 
 
-def as_tensor(dataset: pd.DataFrame, columns: list[str] | None= None) -> torch.Tensor:
+def as_tensor(dataset: pd.DataFrame, columns: list[str] | None = None) -> torch.Tensor:
     if columns is None:
         columns = list(dataset.columns)
 
     return torch.tensor(dataset[columns].values)
+
+
+def partition_frame(
+    frame: pd.DataFrame, split: float
+) -> typing.Tuple[pd.DataFrame, pd.DataFrame]:
+    if not (0 <= split <= 1):
+        raise ValueError(f"expect split to be a fraction of one, got {split}")
+
+    pivot_element_idx = int(split * len(frame))
+
+    return (
+        frame.loc[:pivot_element_idx],
+        frame.loc[pivot_element_idx:],
+    )
+
+
+def build_client_datasets(
+    dataset: pd.DataFrame,
+    client_feature_name_mapping: list[list[str]],
+    train_test_split: float,
+    *,
+    categorical_encoder: EncodingFunction,
+    numerical_encoder: EncodingFunction,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    client_datasets: list[pd.DataFrame] = [
+        encode_dataset(
+            dataset[client_features],
+            categorical_encoder=categorical_encoder,
+            numerical_encoder=numerical_encoder,
+        )
+        for client_features in client_feature_name_mapping
+    ]
+
+    client_datasets_train, client_datasets_test = zip(
+        *[
+            partition_frame(client_dataset, train_test_split)
+            for client_dataset in client_datasets
+        ]
+    )
+
+    client_datasets_train = list(client_datasets_train)
+    client_datasets_test = list(client_datasets_test)
+
+    return (
+        list(map(as_tensor, client_datasets_train)),
+        list(map(as_tensor, client_datasets_test)),
+    )
+
+
+def build_target_dataset(
+    dataset: pd.DataFrame,
+    train_test_split: float,
+    *,
+    categorical_encoder: EncodingFunction,
+    numerical_encoder: EncodingFunction,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    target = encode_feature(
+        dataset["target"],
+        categorical_encoder=categorical_encoder,
+        numerical_encoder=numerical_encoder,
+    )
+
+    target_train, target_test = partition_frame(target, train_test_split)
+
+    return as_tensor(target_train), as_tensor(target_test)
