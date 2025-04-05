@@ -1,3 +1,4 @@
+import typing
 from torch import nn, optim
 import torch
 import torch.nn.functional as F
@@ -10,39 +11,53 @@ from sklearn.preprocessing import StandardScaler
 from centralized import HeartDiseaseNN as EvaluatorModel
 
 
+class LossFunction(typing.Protocol):
+    def __call__(
+        self,
+        outs: torch.Tensor,
+        minibatch_data: torch.Tensor,
+        mean: torch.Tensor,
+        log_variance: torch.Tensor,
+    ) -> torch.Tensor: ...
+
+
 class Autoencoder(nn.Module):
-    def __init__(self, D_in, H=50, H2=12, latent_dim=3):
+    def __init__(
+        self,
+        input_dimensions,
+        wide_hidden_dimensions=50,
+        dense_hidden_dimensions=12,
+        latent_dimensions=3,
+    ):
 
         # Encoder
         super(Autoencoder, self).__init__()
-        self.optimizer = None
-        self.criterion = None
-        self.linear1 = nn.Linear(D_in, H)
-        self.lin_bn1 = nn.BatchNorm1d(num_features=H)
-        self.linear2 = nn.Linear(H, H2)
-        self.lin_bn2 = nn.BatchNorm1d(num_features=H2)
-        self.linear3 = nn.Linear(H2, H2)
-        self.lin_bn3 = nn.BatchNorm1d(num_features=H2)
+        self.linear1 = nn.Linear(input_dimensions, wide_hidden_dimensions)
+        self.lin_bn1 = nn.BatchNorm1d(num_features=wide_hidden_dimensions)
+        self.linear2 = nn.Linear(wide_hidden_dimensions, dense_hidden_dimensions)
+        self.lin_bn2 = nn.BatchNorm1d(num_features=dense_hidden_dimensions)
+        self.linear3 = nn.Linear(dense_hidden_dimensions, dense_hidden_dimensions)
+        self.lin_bn3 = nn.BatchNorm1d(num_features=dense_hidden_dimensions)
 
         #         # Latent vectors mu and sigma
-        self.fc1 = nn.Linear(H2, latent_dim)
-        self.bn1 = nn.BatchNorm1d(num_features=latent_dim)
-        self.fc21 = nn.Linear(latent_dim, latent_dim)
-        self.fc22 = nn.Linear(latent_dim, latent_dim)
+        self.fc1 = nn.Linear(dense_hidden_dimensions, latent_dimensions)
+        self.bn1 = nn.BatchNorm1d(num_features=latent_dimensions)
+        self.fc21 = nn.Linear(latent_dimensions, latent_dimensions)
+        self.fc22 = nn.Linear(latent_dimensions, latent_dimensions)
 
         #         # Sampling vector
-        self.fc3 = nn.Linear(latent_dim, latent_dim)
-        self.fc_bn3 = nn.BatchNorm1d(latent_dim)
-        self.fc4 = nn.Linear(latent_dim, H2)
-        self.fc_bn4 = nn.BatchNorm1d(H2)
+        self.fc3 = nn.Linear(latent_dimensions, latent_dimensions)
+        self.fc_bn3 = nn.BatchNorm1d(latent_dimensions)
+        self.fc4 = nn.Linear(latent_dimensions, dense_hidden_dimensions)
+        self.fc_bn4 = nn.BatchNorm1d(dense_hidden_dimensions)
 
         #         # Decoder
-        self.linear4 = nn.Linear(H2, H2)
-        self.lin_bn4 = nn.BatchNorm1d(num_features=H2)
-        self.linear5 = nn.Linear(H2, H)
-        self.lin_bn5 = nn.BatchNorm1d(num_features=H)
-        self.linear6 = nn.Linear(H, D_in)
-        self.lin_bn6 = nn.BatchNorm1d(num_features=D_in)
+        self.linear4 = nn.Linear(dense_hidden_dimensions, dense_hidden_dimensions)
+        self.lin_bn4 = nn.BatchNorm1d(num_features=dense_hidden_dimensions)
+        self.linear5 = nn.Linear(dense_hidden_dimensions, wide_hidden_dimensions)
+        self.lin_bn5 = nn.BatchNorm1d(num_features=wide_hidden_dimensions)
+        self.linear6 = nn.Linear(wide_hidden_dimensions, input_dimensions)
+        self.lin_bn6 = nn.BatchNorm1d(num_features=input_dimensions)
 
         self.relu = nn.ReLU()
 
@@ -58,56 +73,69 @@ class Autoencoder(nn.Module):
 
         return r1, r2
 
-    def reparameterize(self, mu, logvar):
+    def reparameterize(self, mean, log_variance):
         if self.training:
-            std = logvar.mul(0.5).exp_()
+            std = log_variance.mul(0.5).exp_()
             eps = torch.randn_like(std)
-            return eps.mul(std).add_(mu)
+            return eps.mul(std).add_(mean)
         else:
-            return mu
+            return mean
 
-    def decode(self, z):
-        fc3 = self.relu(self.fc_bn3(self.fc3(z)))
+    def decode(self, reparameterized_latent_representation: torch.Tensor):
+        fc3 = self.relu(self.fc_bn3(self.fc3(reparameterized_latent_representation)))
         fc4 = self.relu(self.fc_bn4(self.fc4(fc3)))
 
         lin4 = self.relu(self.lin_bn4(self.linear4(fc4)))
         lin5 = self.relu(self.lin_bn5(self.linear5(lin4)))
         return self.lin_bn6(self.linear6(lin5))
 
-    def forward(self, x):
+    def forward(self, x) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
 
-    def train_with_settings(self, epochs, batch_sz, real_data, optimizer, loss_fn):
-        self.optimizer = optimizer
-        self.criterion = loss_fn
-        num_batches = len(real_data) // batch_sz if len(real_data) % batch_sz == 0 else len(real_data) // batch_sz + 1
+    def train_with_settings(
+        self,
+        epochs: int,
+        batch_size: int,
+        real_data: torch.Tensor,
+        optimizer: torch.optim.Optimizer,
+        loss_function: LossFunction,
+    ):
+        num_batches = (
+            len(real_data) // batch_size
+            if len(real_data) % batch_size == 0
+            else len(real_data) // batch_size + 1
+        )
         for epoch in range(epochs):
-            self.optimizer.zero_grad()
+            optimizer.zero_grad()
+
             total_loss = 0.0
             for minibatch in range(num_batches):
                 if minibatch == num_batches - 1:
-                    minibatch_data = real_data[int(minibatch * batch_sz):]
+                    minibatch_data = real_data[int(minibatch * batch_size) :]
                 else:
-                    minibatch_data = real_data[int(minibatch * batch_sz):int((minibatch + 1) * batch_sz)]
+                    minibatch_data = real_data[
+                        int(minibatch * batch_size) : int((minibatch + 1) * batch_size)
+                    ]
 
                 outs, mu, logvar = self.forward(minibatch_data)
-                loss = self.criterion(outs, minibatch_data, mu, logvar)
+                loss = loss_function(outs, minibatch_data, mu, logvar)
                 total_loss += loss
                 loss.backward()
-                self.optimizer.step()
+                optimizer.step()
 
             print(
-                f"Epoch: {epoch} Loss: {total_loss.detach().numpy() / num_batches:.3f}")
+                f"Epoch: {epoch} Loss: {total_loss.detach().numpy() / num_batches:.3f}"
+            )
 
-    def sample(self, nr_samples, dims):
+    def sample(self, samples: int, dims) -> np.ndarray:
         # sigma = torch.exp(logvar / 2)
-        no_samples = nr_samples
         sigma = torch.ones(dims)
         mu = torch.zeros(dims)
+
         q = torch.distributions.Normal(mu, sigma)
-        z = q.rsample(sample_shape=torch.Size([no_samples]))
+        z = q.rsample(sample_shape=torch.Size([samples]))
         with torch.no_grad():
             pred = self.decode(z).cpu().numpy()
 
@@ -118,11 +146,11 @@ class Autoencoder(nn.Module):
 
 class customLoss(nn.Module):
     def __init__(self):
-        super(customLoss, self).__init__()
-        self.mse_loss = nn.MSELoss(reduction="sum")
+        super().__init__()
+        self._mse_loss = nn.MSELoss(reduction="sum")
 
     def forward(self, x_recon, x, mu, logvar):
-        loss_MSE = self.mse_loss(x_recon, x)
+        loss_MSE = self._mse_loss(x_recon, x)
         loss_KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
 
         return loss_MSE + loss_KLD
@@ -131,11 +159,13 @@ class customLoss(nn.Module):
 if __name__ == "__main__":
     np.random.seed(42)
     torch.manual_seed(42)
-    df = pd.read_csv(Path(__file__).parent.parent / "datasets" / "heart" / "dataset.csv")
-    categorical = ['sex', 'cp', 'fbs', 'restecg', 'exang', 'slope', 'ca', 'thal']
+    df = pd.read_csv(
+        Path(__file__).parent.parent / "datasets" / "heart" / "dataset.csv"
+    )
+    categorical = ["sex", "cp", "fbs", "restecg", "exang", "slope", "ca", "thal"]
     encoded_df = pd.get_dummies(df, columns=categorical)
     X = encoded_df.drop("target", axis=1)
-    y = encoded_df['target']
+    y = encoded_df["target"]
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
     sc = StandardScaler()
     X_train = sc.fit_transform(X_train)
@@ -150,11 +180,11 @@ if __name__ == "__main__":
     latent_dim = 16
     model = Autoencoder(D_in, H, H2, latent_dim)
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
-    loss_mse = customLoss()
+    loss_mse_kld = customLoss()
     real_data = torch.concat((X_train, y_train.view(-1, 1)), dim=1)
     EPOCHS = 200
     BATCH_SIZE = 64
-    model.train_with_settings(EPOCHS, BATCH_SIZE, real_data, optimizer, loss_mse)
+    model.train_with_settings(EPOCHS, BATCH_SIZE, real_data, optimizer, loss_mse_kld)
 
     _, mu, logvar = model.forward(real_data)
 
@@ -182,8 +212,11 @@ if __name__ == "__main__":
         pred_test = evalm1(X_test)
         _, preds_test_y = torch.max(pred_test, 1)
         test_acc = accuracy_score(y_test, preds_test_y)
-        print("Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(epoch, loss.item(),
-                                                                              train_acc * 100, test_acc * 100))
+        print(
+            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
+                epoch, loss.item(), train_acc * 100, test_acc * 100
+            )
+        )
 
     print("--------------Testing model trained on synthetic data----------")
     evalm2 = EvaluatorModel()
@@ -205,5 +238,8 @@ if __name__ == "__main__":
         pred_test = evalm2(X_test)
         _, preds_test_y = torch.max(pred_test, 1)
         test_acc = accuracy_score(y_test, preds_test_y)
-        print("Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(epoch, loss.item(),
-                                                                              train_acc * 100, test_acc * 100))
+        print(
+            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
+                epoch, loss.item(), train_acc * 100, test_acc * 100
+            )
+        )
