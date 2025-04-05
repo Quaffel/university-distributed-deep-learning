@@ -41,7 +41,8 @@ class BottomModel(nn.Module):
         self.layer = nn.Sequential(
             nn.Sequential(nn.Linear(input_dimensions, output_dimensions), nn.ReLU()),
             nn.Sequential(
-                nn.Linear(output_dimensions, output_dimensions), nn.ReLU(), nn.ReLU()
+                nn.Linear(output_dimensions, output_dimensions),
+                nn.ReLU(),
             ),
             nn.Dropout(0.1),
         )
