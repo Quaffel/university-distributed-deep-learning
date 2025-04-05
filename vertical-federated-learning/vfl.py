@@ -80,6 +80,7 @@ class AggregationModel(nn.Module):
 
         # TODO: Difference to Adam?
         self._optimizer = optim.AdamW(self.parameters())
+
         self._criterion = nn.CrossEntropyLoss()
 
     def train_with_settings(
@@ -89,6 +90,7 @@ class AggregationModel(nn.Module):
         client_datasets: list[torch.Tensor],
         dataset_targets: torch.Tensor,
     ):
+        self.train()
         x_train = client_datasets
         y_train = dataset_targets
 
@@ -149,6 +151,7 @@ class AggregationModel(nn.Module):
         client_datasets: list[torch.Tensor],
         dataset_targets: torch.Tensor,
     ) -> tuple[float, float]:
+        self.eval()
         x_test = client_datasets
         y_test = dataset_targets
         dataset_size = y_test.shape[0]
@@ -179,6 +182,13 @@ def main(
     np.random.seed(42)
 
     dataset = load_dataset("../datasets/heart/dataset.csv")
+
+    # TODO: Implement proper fix for workaround
+    #       Data needs to be encoded exactly once, and that before the data is split into training and test set.
+    #       This is necessary since the normalization step depends on the data it observes.
+    dataset = preprocessing._encode_dataset(dataset, True)
+
+    print(dataset.describe())
     dataset_train, dataset_test = partitions.partition_frame(dataset, train_test_split)
 
     client_feature_name_mapping: list[list[str]] = (

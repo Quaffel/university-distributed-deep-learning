@@ -5,26 +5,29 @@ import torch
 from sklearn.preprocessing import MinMaxScaler
 
 _features: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
+    "age": "numerical",
     "sex": "categorical",
     "cp": "categorical",
+    "trestbps": "numerical",
+    "chol": "numerical",
     "fbs": "categorical",
     "restecg": "categorical",
+    "thalach": "numerical",
     "exang": "categorical",
+    "oldpeak": "numerical",
     "slope": "categorical",
     "ca": "categorical",
     "thal": "categorical",
-    "age": "numerical",
-    "trestbps": "numerical",
-    "chol": "numerical",
-    "thalach": "numerical",
-    "oldpeak": "numerical",
 }
 
 _targets: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
     "target": "categorical",
 }
 
-_columns: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {**_features, **_targets}
+_columns: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
+    **_features,
+    **_targets,
+}
 
 feature_names = list(_features.keys())
 
@@ -59,15 +62,18 @@ def _encode_feature(feature: pd.Series) -> pd.DataFrame:
             raise ValueError(f"encountered unrecognized feature '{feature_name}'")
 
 
-def _encode_dataset(
-    dataset: pd.DataFrame
-) -> pd.DataFrame:
+def _encode_dataset(dataset: pd.DataFrame, test: bool = False) -> pd.DataFrame:
     def preprocess_feature(feature_name: str) -> pd.DataFrame:
+        if test and _columns.get(feature_name) == 'categorical':
+            return pd.DataFrame(dataset[feature_name], columns=[feature_name], index=dataset.index)
+        if not test and _columns.get(feature_name) == 'numerical':
+            return pd.DataFrame(dataset[feature_name], columns=[feature_name], index=dataset.index)
+
         feature: pd.Series = dataset[feature_name]
         return _encode_feature(feature)
 
     encoded_client_features = [preprocess_feature(it) for it in dataset.columns]
-    return pd.concat(encoded_client_features, axis=1, ignore_index=True)
+    return pd.concat(encoded_client_features, axis=1)
 
 
 def build_client_datasets(
