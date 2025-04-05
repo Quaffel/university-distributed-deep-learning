@@ -50,33 +50,39 @@ class Autoencoder(nn.Module):
             nn.Sequential(
                 nn.Linear(dense_hidden_dimensions, latent_dimensions),
                 nn.BatchNorm1d(num_features=latent_dimensions),
-                nn.ReLU()
+                nn.ReLU(),
             ),
         )
 
         self.latent_layer_mean = nn.Linear(latent_dimensions, latent_dimensions)
         self.latent_layer_log_variance = nn.Linear(latent_dimensions, latent_dimensions)
 
-        #         # Sampling vector
-        # self.decoder = nn.Sequential(
-        #     nn.Sequential(
-        #         
-        #     )
-        # )
-        self.fc3 = nn.Linear(latent_dimensions, latent_dimensions)
-        self.fc_bn3 = nn.BatchNorm1d(latent_dimensions)
-        self.fc4 = nn.Linear(latent_dimensions, dense_hidden_dimensions)
-        self.fc_bn4 = nn.BatchNorm1d(dense_hidden_dimensions)
-
-        #         # Decoder
-        self.linear4 = nn.Linear(dense_hidden_dimensions, dense_hidden_dimensions)
-        self.lin_bn4 = nn.BatchNorm1d(num_features=dense_hidden_dimensions)
-        self.linear5 = nn.Linear(dense_hidden_dimensions, wide_hidden_dimensions)
-        self.lin_bn5 = nn.BatchNorm1d(num_features=wide_hidden_dimensions)
-        self.linear6 = nn.Linear(wide_hidden_dimensions, input_dimensions)
-        self.lin_bn6 = nn.BatchNorm1d(num_features=input_dimensions)
-
-        self.relu = nn.ReLU()
+        self.decoder = nn.Sequential(
+            nn.Sequential(
+                nn.Linear(latent_dimensions, latent_dimensions),
+                nn.BatchNorm1d(latent_dimensions),
+                nn.ReLU(),
+            ),
+            nn.Sequential(
+                nn.Linear(latent_dimensions, dense_hidden_dimensions),
+                nn.BatchNorm1d(dense_hidden_dimensions),
+                nn.ReLU(),
+            ),
+            nn.Sequential(
+                nn.Linear(dense_hidden_dimensions, dense_hidden_dimensions),
+                nn.BatchNorm1d(num_features=dense_hidden_dimensions),
+                nn.ReLU(),
+            ),
+            nn.Sequential(
+                nn.Linear(dense_hidden_dimensions, wide_hidden_dimensions),
+                nn.BatchNorm1d(num_features=wide_hidden_dimensions),
+                nn.ReLU(),
+            ),
+            nn.Sequential(
+                nn.Linear(wide_hidden_dimensions, input_dimensions),
+                nn.BatchNorm1d(num_features=input_dimensions),
+            ),
+        )
 
     def encode(self, x):
         encoded = self.encoder(x)
@@ -87,20 +93,17 @@ class Autoencoder(nn.Module):
         return mean, log_variance
 
     def reparameterize(self, mean, log_variance):
-        if self.training:
-            std = log_variance.mul(0.5).exp_()
-            eps = torch.randn_like(std)
-            return eps.mul(std).add_(mean)
-        else:
+        if not self.training:
+            # leave mean unchanged during inference
             return mean
 
-    def decode(self, reparameterized_latent_representation: torch.Tensor):
-        fc3 = self.relu(self.fc_bn3(self.fc3(reparameterized_latent_representation)))
-        fc4 = self.relu(self.fc_bn4(self.fc4(fc3)))
+        # create new samples based on the parameters predicted by the encoder
+        std = log_variance.mul(0.5).exp_()
+        eps = torch.randn_like(std)
+        return eps.mul(std).add_(mean)
 
-        lin4 = self.relu(self.lin_bn4(self.linear4(fc4)))
-        lin5 = self.relu(self.lin_bn5(self.linear5(lin4)))
-        return self.lin_bn6(self.linear6(lin5))
+    def decode(self, reparameterized_latent_representation: torch.Tensor):
+        return self.decoder(reparameterized_latent_representation)
 
     def forward(self, x) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         mu, logvar = self.encode(x)
