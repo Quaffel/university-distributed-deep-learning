@@ -1,5 +1,7 @@
+from pathlib import Path
 import typing
 
+import numpy as np
 import pandas as pd
 import torch
 from sklearn.preprocessing import MinMaxScaler
@@ -32,6 +34,10 @@ _columns: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
 feature_names = list(_features.keys())
 
 
+def load_dataset(path: Path) -> pd.DataFrame:
+    return pd.read_csv(path, dtype=np.float32)
+
+
 def _encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(
         MinMaxScaler().fit_transform(pd.DataFrame(feature)),
@@ -62,13 +68,8 @@ def _encode_feature(feature: pd.Series) -> pd.DataFrame:
             raise ValueError(f"encountered unrecognized feature '{feature_name}'")
 
 
-def _encode_dataset(dataset: pd.DataFrame, test: bool = False) -> pd.DataFrame:
+def encode_dataset(dataset: pd.DataFrame) -> pd.DataFrame:
     def preprocess_feature(feature_name: str) -> pd.DataFrame:
-        if test and _columns.get(feature_name) == 'categorical':
-            return pd.DataFrame(dataset[feature_name], columns=[feature_name], index=dataset.index)
-        if not test and _columns.get(feature_name) == 'numerical':
-            return pd.DataFrame(dataset[feature_name], columns=[feature_name], index=dataset.index)
-
         feature: pd.Series = dataset[feature_name]
         return _encode_feature(feature)
 
@@ -76,14 +77,8 @@ def _encode_dataset(dataset: pd.DataFrame, test: bool = False) -> pd.DataFrame:
     return pd.concat(encoded_client_features, axis=1)
 
 
-def build_client_datasets(
-    dataset: pd.DataFrame, client_feature_name_mapping: list[list[str]]
-) -> typing.Tuple[list[torch.Tensor], torch.Tensor]:
-    x_train = [
-        torch.tensor(_encode_dataset(dataset[client_features]).values)
-        for client_features in client_feature_name_mapping
-    ]
+def as_tensor(dataset: pd.DataFrame, columns: list[str] | None= None) -> torch.Tensor:
+    if columns is None:
+        columns = list(dataset.columns)
 
-    y_train = torch.tensor(_encode_dataset(dataset[["target"]]).values)
-
-    return x_train, y_train
+    return torch.tensor(dataset[columns].values)

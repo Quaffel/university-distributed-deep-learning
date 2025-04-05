@@ -1,14 +1,13 @@
-import typing
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from components import partitions, preprocessing
 from torch import nn
 from tqdm import tqdm
-
-from components import partitions, preprocessing
 
 # L_p normalization, maps every component to range from 0 to 1
 # nn.functional.normalize()
@@ -165,8 +164,40 @@ class AggregationModel(nn.Module):
             return accuracy, loss
 
 
-def load_dataset(path: str) -> pd.DataFrame:
-    return pd.read_csv(path, dtype=np.float32)
+def build_client_datasets(
+    dataset: pd.DataFrame,
+    client_feature_name_mapping: list[list[str]],
+    train_test_split: float,
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    client_datasets = [
+        preprocessing.encode_dataset(dataset[client_features])
+        for client_features in client_feature_name_mapping
+    ]
+
+    client_datasets_train, client_datasets_test = zip(
+        *[
+            partitions.partition_frame(client_dataset, train_test_split)
+            for client_dataset in client_datasets
+        ]
+    )
+
+    client_datasets_train = list(client_datasets_train)
+    client_datasets_test = list(client_datasets_test)
+
+    return (
+        list(map(preprocessing.as_tensor, client_datasets_train)),
+        list(map(preprocessing.as_tensor, client_datasets_test)),
+    )
+
+
+def build_target_dataset(
+    dataset: pd.DataFrame, train_test_split: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    target = preprocessing._encode_feature(dataset["target"])
+
+    target_train, target_test = partitions.partition_frame(target, train_test_split)
+
+    return preprocessing.as_tensor(target_train), preprocessing.as_tensor(target_test)
 
 
 def main(
@@ -181,15 +212,9 @@ def main(
     torch.manual_seed(42)
     np.random.seed(42)
 
-    dataset = load_dataset("../datasets/heart/dataset.csv")
-
-    # TODO: Implement proper fix for workaround
-    #       Data needs to be encoded exactly once, and that before the data is split into training and test set.
-    #       This is necessary since the normalization step depends on the data it observes.
-    dataset = preprocessing._encode_dataset(dataset, True)
-
-    print(dataset.describe())
-    dataset_train, dataset_test = partitions.partition_frame(dataset, train_test_split)
+    dataset = preprocessing.load_dataset(
+        Path(__file__).parent.parent / "datasets" / "heart" / "dataset.csv"
+    )
 
     client_feature_name_mapping: list[list[str]] = (
         partitions.partition_elements_uniformly(
@@ -197,11 +222,15 @@ def main(
         )
     )
 
-    # model setup and training
-    client_datasets_train, dataset_train_targets = preprocessing.build_client_datasets(
-        dataset_train, client_feature_name_mapping
+    client_datasets_train, client_datasets_test = build_client_datasets(
+        dataset, client_feature_name_mapping, train_test_split
     )
 
+    dataset_target_train, dataset_target_test = build_target_dataset(
+        dataset, train_test_split
+    )
+
+    # model setup and training
     bottom_models: list[nn.Module] = [
         BottomModel(
             client_dataset.shape[1],
@@ -212,15 +241,10 @@ def main(
 
     model = AggregationModel(bottom_models, output_dimensions)
 
-    model.train_with_settings(
-        epochs, batch_size, client_datasets_train, dataset_train_targets
-    )
+    model.train_with_settings(epochs, batch_size, client_datasets_train, dataset_target_train)
 
     # testing
-    client_datasets_test, dataset_test_targets = preprocessing.build_client_datasets(
-        dataset_test, client_feature_name_mapping
-    )
-    accuracy, loss = model.test(client_datasets_test, dataset_test_targets)
+    accuracy, loss = model.test(client_datasets_test, dataset_target_test)
     print(f"Test accuracy: {accuracy * 100:.2f}%, test loss: {loss:.3f}")
 
 
