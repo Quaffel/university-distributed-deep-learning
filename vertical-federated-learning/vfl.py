@@ -5,9 +5,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from sklearn.preprocessing import MinMaxScaler
 from torch import nn
 from tqdm import tqdm
+
+from components import partitions, preprocessing
 
 # L_p normalization, maps every component to range from 0 to 1
 # nn.functional.normalize()
@@ -165,111 +166,6 @@ def load_dataset(path: str) -> pd.DataFrame:
     return pd.read_csv(path, dtype=np.float32)
 
 
-def partition_elements_uniformly(
-    elements: list[str], partitions: int
-) -> list[list[str]]:
-    def generate_partitions():
-        if partitions < 1:
-            raise ValueError(f"expected at least one partition, got {partitions}")
-
-        partition_size = len(elements) // partitions
-
-        partition_start_idx = 0
-        for _ in range(partitions - 1):
-            partition_end_idx = partition_start_idx + partition_size
-            yield elements[partition_start_idx:partition_end_idx]
-
-            partition_start_idx = partition_end_idx
-
-        yield elements[partition_start_idx:]
-
-    return list(generate_partitions())
-
-
-def partition_frame(
-    frame: pd.DataFrame, split: float
-) -> typing.Tuple[pd.DataFrame, pd.DataFrame]:
-    if not (0 <= split <= 1):
-        raise ValueError(f"expect split to be a fraction of one, got {split}")
-
-    pivot_element_idx = int(split * len(frame))
-
-    return (
-        frame.loc[:pivot_element_idx],
-        frame.loc[pivot_element_idx:],
-    )
-
-
-features: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
-    "sex": "categorical",
-    "cp": "categorical",
-    "fbs": "categorical",
-    "restecg": "categorical",
-    "exang": "categorical",
-    "slope": "categorical",
-    "ca": "categorical",
-    "thal": "categorical",
-    "age": "numerical",
-    "trestbps": "numerical",
-    "chol": "numerical",
-    "thalach": "numerical",
-    "oldpeak": "numerical",
-}
-
-
-def encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.DataFrame(
-        MinMaxScaler().fit_transform(pd.DataFrame(feature)), columns=[feature.name],
-        index=feature.index
-    )
-
-
-def encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.get_dummies(pd.DataFrame(feature), columns=[feature.name]).astype(
-        "float32"
-    )
-
-
-def encode_feature(feature: pd.Series) -> pd.DataFrame:
-    feature_name = feature.name
-    if type(feature_name) != str:
-        raise ValueError(
-            f"name of feature series must be string, got {type(feature_name)}"
-        )
-
-    match features.get(feature_name, None):
-        case "categorical":
-            return encode_categorical_feature(feature)
-        case "numerical":
-            return encode_numerical_feature(feature)
-        case None:
-            raise ValueError(f"encountered unrecognized feature '{feature_name}'")
-
-
-def build_client_dataset(
-    dataset: pd.DataFrame, client_feature_names: list[str]
-) -> pd.DataFrame:
-    def preprocess_feature(feature_name: str) -> pd.DataFrame:
-        feature: pd.Series = dataset[feature_name]
-        return encode_feature(feature)
-
-    encoded_client_features = [preprocess_feature(it) for it in client_feature_names]
-    return pd.concat(encoded_client_features, axis=1, ignore_index=True)
-
-
-def build_client_datasets(
-    dataset: pd.DataFrame, client_feature_name_mapping: list[list[str]]
-) -> typing.Tuple[list[torch.Tensor], torch.Tensor]:
-    x_train = [
-        torch.tensor(build_client_dataset(dataset, client_features).values)
-        for client_features in client_feature_name_mapping
-    ]
-
-    y_train = torch.tensor(encode_categorical_feature(dataset["target"]).values)
-
-    return x_train, y_train
-
-
 def main(
     *,
     clients: int = 4,
@@ -283,14 +179,16 @@ def main(
     np.random.seed(42)
 
     dataset = load_dataset("../datasets/heart/dataset.csv")
-    dataset_train, dataset_test = partition_frame(dataset, train_test_split)
+    dataset_train, dataset_test = partitions.partition_frame(dataset, train_test_split)
 
-    client_feature_name_mapping: list[list[str]] = partition_elements_uniformly(
-        list(features.keys()), clients
+    client_feature_name_mapping: list[list[str]] = (
+        partitions.partition_elements_uniformly(
+            list(preprocessing.feature_names), clients
+        )
     )
 
     # model setup and training
-    client_datasets_train, dataset_train_targets = build_client_datasets(
+    client_datasets_train, dataset_train_targets = preprocessing.build_client_datasets(
         dataset_train, client_feature_name_mapping
     )
 
@@ -309,7 +207,7 @@ def main(
     )
 
     # testing
-    client_datasets_test, dataset_test_targets = build_client_datasets(
+    client_datasets_test, dataset_test_targets = preprocessing.build_client_datasets(
         dataset_test, client_feature_name_mapping
     )
     accuracy, loss = model.test(client_datasets_test, dataset_test_targets)
