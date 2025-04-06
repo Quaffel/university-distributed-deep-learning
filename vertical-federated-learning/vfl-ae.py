@@ -1,12 +1,9 @@
-import typing
 from torch import nn, optim
 import torch
-import torch.nn.functional as F
 from pathlib import Path
 import pandas as pd
 import numpy as np
 from sklearn.metrics import accuracy_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from centralized import HeartDiseaseNN as EvaluatorModel
 
@@ -67,18 +64,48 @@ def _run_evaluator_model(
         )
 
 
-def _encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.DataFrame(
-        StandardScaler().fit_transform(pd.DataFrame(feature)),
-        columns=[feature.name],
-        index=feature.index,
-    )
+def _encode_categorical_feature(dataset: pd.DataFrame) -> pd.DataFrame:
+    return pd.get_dummies(dataset, columns=dataset.columns).astype("float32")
 
 
-def _encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.get_dummies(pd.DataFrame(feature), columns=[feature.name]).astype(
-        "float32"
-    )
+class NumericalFeatureEncoder:
+    def __init__(self):
+        self._scaler = StandardScaler()
+
+    def train_and_transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(
+            self._scaler.fit_transform(dataset),
+            columns=dataset.columns,
+            index=dataset.index,
+        )
+
+    def transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(
+            self._scaler.transform(dataset),
+            columns=dataset.columns,
+            index=dataset.index,
+        )
+
+
+class CategoricalFeatureEncoder:
+    def __init__(self):
+        self._scaler = StandardScaler()
+
+    def train_and_transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        dataset = _encode_categorical_feature(dataset)
+        return pd.DataFrame(
+            self._scaler.fit_transform(dataset),
+            columns=dataset.columns,
+            index=dataset.index,
+        )
+
+    def transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
+        dataset = _encode_categorical_feature(dataset)
+        return pd.DataFrame(
+            self._scaler.transform(dataset),
+            columns=dataset.columns,
+            index=dataset.index,
+        )
 
 
 def main():
@@ -89,30 +116,63 @@ def main():
         Path(__file__).parent.parent / "datasets" / "heart" / "dataset.csv"
     )
 
-    categorical = ["sex", "cp", "fbs", "restecg", "exang", "slope", "ca", "thal"]
-    encoded_df = pd.get_dummies(dataset, columns=categorical)
-    X = encoded_df.drop("target", axis=1)
-    y = encoded_df["target"]
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
-    sc = StandardScaler()
-    X_train = sc.fit_transform(X_train)
-    X_test = sc.transform(X_test)
-    X_train = torch.tensor(X_train).float()
-    X_test = torch.tensor(X_test).float()
-    y_train = torch.tensor(y_train.values).long()
-    y_test = torch.tensor(y_test.values).long()
+    numerical_encoder = NumericalFeatureEncoder()
+    categorical_encoder = CategoricalFeatureEncoder()
+
+    dataset_features = dataset.drop("target", axis=1)
+    dataset_targets = dataset["target"]
+
+    def encode_features(dataset: pd.DataFrame, train: bool):
+        if train:
+            encode_categorical_feature = categorical_encoder.train_and_transform_feature
+            encode_numerical_feature = numerical_encoder.train_and_transform_feature
+        else:
+            encode_categorical_feature = categorical_encoder.transform_feature
+            encode_numerical_feature = numerical_encoder.transform_feature
+
+        dataset = preprocessing.encode_dataset(
+            dataset,
+            categorical_encoder=encode_categorical_feature,
+            numerical_encoder=encode_numerical_feature,
+            encode_targets=False,
+        )
+
+        return preprocessing.as_tensor(dataset)
+
+    dataset_features_train, dataset_features_test = preprocessing.partition_frame(dataset_features, 0.8)
+    dataset_features_train = encode_features(dataset_features_train, True)
+    dataset_features_test = encode_features(dataset_features_test, False)
+
+
+    def encode_targets(feature: pd.Series):
+        return torch.tensor(feature.values).long()
+
+    dataset_target_train, dataset_target_test = map(
+        encode_targets,
+        preprocessing.partition_series(dataset_targets, 0.8),
+    )
+
     model = Autoencoder(
-        input_dimensions=X.shape[1] + 1,  # why +1?
+        input_dimensions=dataset_features_train.shape[1] + 1,  # why +1?
         wide_hidden_dimensions=48,
         narrow_hidden_dimensions=32,
         latent_dimensions=16,
     )
+
     optimizer = optim.Adam(model.parameters(), lr=1e-3)
     loss_function = MseKldLoss()
-    real_data = torch.concat((X_train, y_train.view(-1, 1)), dim=1)
-    EPOCHS = 200
-    BATCH_SIZE = 64
-    model.train_with_settings(EPOCHS, BATCH_SIZE, real_data, optimizer, loss_function)
+
+    real_data = torch.concat(
+        (dataset_features_train, dataset_target_train.view(-1, 1)), dim=1
+    )
+
+    model.train_with_settings(
+        epochs=200,
+        batch_size=64,
+        real_data=real_data,
+        optimizer=optimizer,
+        loss_function=loss_function,
+    )
 
     _, mu, logvar = model.forward(real_data)
 
@@ -121,10 +181,17 @@ def main():
     synthetic_y = torch.tensor(synthetic_data[:, -1]).long()
 
     print("--------------Testing model trained on real data----------")
-    _run_evaluator_model(X_train, y_train, X_test, y_test)
+    _run_evaluator_model(
+        dataset_features_train,
+        dataset_target_train,
+        dataset_features_test,
+        dataset_target_test,
+    )
 
     print("--------------Testing model trained on synthetic data----------")
-    _run_evaluator_model(synthetic_x, synthetic_y, X_test, y_test)
+    _run_evaluator_model(
+        synthetic_x, synthetic_y, dataset_features_test, dataset_target_test
+    )
 
 
 if __name__ == "__main__":

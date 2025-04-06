@@ -152,17 +152,15 @@ class AggregationModel(nn.Module):
             return accuracy, loss
 
 
-def _encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
+def _encode_categorical_feature(dataset: pd.DataFrame) -> pd.DataFrame:
+    return pd.get_dummies(dataset, columns=dataset.columns).astype("float32")
+
+
+def _encode_numerical_feature(dataset: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(
-        MinMaxScaler().fit_transform(pd.DataFrame(feature)),
-        columns=[feature.name],
-        index=feature.index,
-    )
-
-
-def _encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
-    return pd.get_dummies(pd.DataFrame(feature), columns=[feature.name]).astype(
-        "float32"
+        MinMaxScaler().fit_transform(dataset),
+        columns=dataset.columns,
+        index=dataset.index,
     )
 
 
@@ -200,7 +198,6 @@ def main(
         dataset,
         train_test_split,
         categorical_encoder=_encode_categorical_feature,
-        numerical_encoder=_encode_numerical_feature,
     )
 
     # model setup and training
