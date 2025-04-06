@@ -26,6 +26,47 @@ class MseKldLoss(nn.Module):
         return loss_MSE + loss_KLD
 
 
+def _run_evaluator_model(
+    features_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    features_test: torch.Tensor,
+    targets_test: torch.Tensor,
+):
+    model = EvaluatorModel()
+    optimizer = optim.AdamW(model.parameters())
+
+    loss_function = nn.CrossEntropyLoss()
+
+    losses = []
+
+    for epoch in range(1, 50):
+        # train evaluator model
+        optimizer.zero_grad()
+
+        outputs_train = model(features_train)
+        loss = loss_function(outputs_train, targets_train)
+
+        loss.backward()
+        optimizer.step()
+
+        losses.append(loss.item())
+
+        predictions_train = torch.argmax(outputs_train, 1)
+        train_accuracy = accuracy_score(targets_train, predictions_train)
+
+        # test evaluator model
+        outputs_test = model(features_test)
+
+        predictions_test = torch.argmax(outputs_test, 1)
+        test_accuracy = accuracy_score(targets_test, predictions_test)
+
+        print(
+            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
+                epoch, loss.item(), train_accuracy * 100, test_accuracy * 100
+            )
+        )
+
+
 def _encode_numerical_feature(feature: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(
         StandardScaler().fit_transform(pd.DataFrame(feature)),
@@ -40,7 +81,7 @@ def _encode_categorical_feature(feature: pd.Series) -> pd.DataFrame:
     )
 
 
-if __name__ == "__main__":
+def main():
     np.random.seed(42)
     torch.manual_seed(42)
 
@@ -80,53 +121,11 @@ if __name__ == "__main__":
     synthetic_y = torch.tensor(synthetic_data[:, -1]).long()
 
     print("--------------Testing model trained on real data----------")
-    evalm1 = EvaluatorModel()
-    opt1 = optim.AdamW(evalm1.parameters())
-    criterion = nn.CrossEntropyLoss()
-
-    losses = []
-
-    for epoch in range(1, 50):
-        opt1.zero_grad()
-        outputs = evalm1(X_train)
-        loss = criterion(outputs, y_train)
-        loss.backward()
-        opt1.step()
-        losses.append(loss.item())
-        _, preds_y = torch.max(outputs, 1)
-        train_acc = accuracy_score(y_train, preds_y)
-
-        pred_test = evalm1(X_test)
-        _, preds_test_y = torch.max(pred_test, 1)
-        test_acc = accuracy_score(y_test, preds_test_y)
-        print(
-            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
-                epoch, loss.item(), train_acc * 100, test_acc * 100
-            )
-        )
+    _run_evaluator_model(X_train, y_train, X_test, y_test)
 
     print("--------------Testing model trained on synthetic data----------")
-    evalm2 = EvaluatorModel()
-    opt2 = optim.AdamW(evalm2.parameters())
-    criterion = nn.CrossEntropyLoss()
+    _run_evaluator_model(synthetic_x, synthetic_y, X_test, y_test)
 
-    losses = []
 
-    for epoch in range(1, 50):
-        opt2.zero_grad()
-        outputs = evalm2(synthetic_x)
-        loss = criterion(outputs, synthetic_y)
-        loss.backward()
-        opt2.step()
-        losses.append(loss.item())
-        _, preds_y = torch.max(outputs, 1)
-        train_acc = accuracy_score(synthetic_y, preds_y)
-
-        pred_test = evalm2(X_test)
-        _, preds_test_y = torch.max(pred_test, 1)
-        test_acc = accuracy_score(y_test, preds_test_y)
-        print(
-            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
-                epoch, loss.item(), train_acc * 100, test_acc * 100
-            )
-        )
+if __name__ == "__main__":
+    main()
