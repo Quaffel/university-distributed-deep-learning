@@ -6,6 +6,7 @@ from sklearn.preprocessing import MinMaxScaler
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from models.mlp import TwoLayerMlp
 from components import partitions, preprocessing
 from torch import nn
 from tqdm import tqdm
@@ -32,27 +33,7 @@ from tqdm import tqdm
 # print(normalized_features)
 
 
-class BottomModel(nn.Module):
-    def __init__(self, input_dimensions, output_dimensions):
-        super(BottomModel, self).__init__()
-
-        self._output_dimensions = output_dimensions
-
-        self.layer = nn.Sequential(
-            nn.Sequential(nn.Linear(input_dimensions, output_dimensions), nn.ReLU()),
-            nn.Sequential(
-                nn.Linear(output_dimensions, output_dimensions),
-                nn.ReLU(),
-            ),
-            nn.Dropout(0.1),
-        )
-
-    def forward(self, x):
-        return self.layer(x)
-
-    @property
-    def output_dimensions(self) -> int:
-        return self._output_dimensions
+BottomModel = TwoLayerMlp
 
 
 class TopModel(nn.Module):
