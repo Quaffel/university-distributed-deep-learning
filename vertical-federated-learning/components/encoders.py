@@ -2,10 +2,6 @@ import pandas as pd
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 
-def _encode_categorical_feature(dataset: pd.DataFrame) -> pd.DataFrame:
-    return pd.get_dummies(dataset, columns=dataset.columns).astype("float32")
-
-
 class NormalNumericalEncoder:
     def __init__(self):
         self._scaler = StandardScaler()
@@ -37,27 +33,6 @@ class MinMaxNumericalEncoder:
         )
 
     def transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(
-            self._scaler.transform(dataset),
-            columns=dataset.columns,
-            index=dataset.index,
-        )
-
-
-class NormalizedCategoryEncoder:
-    def __init__(self):
-        self._scaler = StandardScaler()
-
-    def train_and_transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        dataset = _encode_categorical_feature(dataset)
-        return pd.DataFrame(
-            self._scaler.fit_transform(dataset),
-            columns=dataset.columns,
-            index=dataset.index,
-        )
-
-    def transform_feature(self, dataset: pd.DataFrame) -> pd.DataFrame:
-        dataset = _encode_categorical_feature(dataset)
         return pd.DataFrame(
             self._scaler.transform(dataset),
             columns=dataset.columns,

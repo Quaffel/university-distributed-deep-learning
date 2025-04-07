@@ -5,6 +5,7 @@ class TwoLayerMlp(nn.Module):
     def __init__(self, input_dimensions, output_dimensions):
         super(TwoLayerMlp, self).__init__()
 
+        self._input_dimensions = input_dimensions
         self._output_dimensions = output_dimensions
 
         self.layer = nn.Sequential(
@@ -18,6 +19,10 @@ class TwoLayerMlp(nn.Module):
 
     def forward(self, x):
         return self.layer(x)
+
+    @property
+    def input_dimensions(self) -> int:
+        return self._input_dimensions
 
     @property
     def output_dimensions(self) -> int:

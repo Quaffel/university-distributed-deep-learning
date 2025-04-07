@@ -104,42 +104,7 @@ class Autoencoder(nn.Module):
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
 
-    def train_with_settings(
-        self,
-        epochs: int,
-        batch_size: int,
-        real_data: torch.Tensor,
-        optimizer: torch.optim.Optimizer,
-        loss_function: LossFunction,
-    ):
-        num_batches = (
-            len(real_data) // batch_size
-            if len(real_data) % batch_size == 0
-            else len(real_data) // batch_size + 1
-        )
-        for epoch in range(epochs):
-            optimizer.zero_grad()
-
-            total_loss = 0.0
-            for minibatch in range(num_batches):
-                if minibatch == num_batches - 1:
-                    minibatch_data = real_data[int(minibatch * batch_size) :]
-                else:
-                    minibatch_data = real_data[
-                        int(minibatch * batch_size) : int((minibatch + 1) * batch_size)
-                    ]
-
-                outs, mu, logvar = self.forward(minibatch_data)
-                loss = loss_function(outs, minibatch_data, mu, logvar)
-                total_loss += loss
-                loss.backward()
-                optimizer.step()
-
-            print(
-                f"Epoch: {epoch} Loss: {total_loss.detach().numpy() / num_batches:.3f}"
-            )
-
-    def sample(self, samples: int, dims) -> np.ndarray:
+    def sample(self, samples: int, dims) -> torch.Tensor:
         # sigma = torch.exp(logvar / 2)
         sigma = torch.ones(dims)
         mu = torch.zeros(dims)
@@ -151,4 +116,15 @@ class Autoencoder(nn.Module):
 
         pred[:, -1] = np.clip(pred[:, -1], 0, 1)
         pred[:, -1] = np.round(pred[:, -1])
-        return pred
+
+        return torch.tensor(pred)
+
+    def sample_concrete(self, samples: int, mean: torch.Tensor, log_variance: torch.Tensor) -> torch.Tensor:
+        sigma = torch.exp(log_variance / 2)
+
+        q = torch.distributions.Normal(mean[0], sigma[0])
+        z = q.rsample(sample_shape=torch.Size([samples]))
+        with torch.no_grad():
+            pred = self.decode(z).cpu().numpy()
+
+        return torch.tensor(pred)

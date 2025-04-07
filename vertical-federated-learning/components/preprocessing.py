@@ -21,15 +21,6 @@ _features: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
     "thal": "categorical",
 }
 
-_targets: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
-    "target": "categorical",
-}
-
-_columns: typing.Mapping[str, typing.Literal["categorical", "numerical"]] = {
-    **_features,
-    **_targets,
-}
-
 feature_names = list(_features.keys())
 
 
@@ -51,7 +42,7 @@ def encode_dataset(
 
     categorical_features = [
         feature_name
-        for feature_name, feature_type in _columns.items()
+        for feature_name, feature_type in _features.items()
         if feature_type == "categorical" and feature_name in dataset.columns
     ]
     if len(categorical_features) > 0:
@@ -60,13 +51,16 @@ def encode_dataset(
 
     numerical_features = [
         feature_name
-        for feature_name, feature_type in _columns.items()
+        for feature_name, feature_type in _features.items()
         if feature_type == "numerical" and feature_name in dataset.columns
     ]
     if len(numerical_features) > 0:
         encoded_numerical_dataset = numerical_encoder(dataset[numerical_features])
         encoded_frames.append(encoded_numerical_dataset)
-    
+
+    if "target" in dataset.columns:
+        encoded_frames.append(dataset["target"].to_frame())
+
     return pd.concat(encoded_frames, axis=1)
 
 

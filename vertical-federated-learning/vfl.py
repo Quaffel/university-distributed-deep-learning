@@ -5,32 +5,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from components import encoders, partitions, preprocessing
 from models.mlp import TwoLayerMlp
-from components import partitions, preprocessing, encoders
 from torch import nn
 from tqdm import tqdm
-
-# L_p normalization, maps every component to range from 0 to 1
-# nn.functional.normalize()
-
-# MinMaxScaler (makes significant difference as to how negative values are scaled)
-# X_std = (X - X.min(axis=0)) / (X.max(axis=0) - X.min(axis=0))
-# X_scaled = X_std * (max - min) + min
-
-
-# import torch
-#
-# def scale_to_minus_one_to_one(tensor, min_val, max_val):
-#     return 2 * (tensor - min_val) / (max_val - min_val) - 1
-#
-# # Example usage
-# features = torch.tensor([[-5.0, 0.0, 10.0], [2.0, -3.0, 7.0]])
-# min_vals = features.min(dim=0).values  # Minimum value for each feature
-# max_vals = features.max(dim=0).values  # Maximum value for each feature
-#
-# normalized_features = scale_to_minus_one_to_one(features, min_vals, max_vals)
-# print(normalized_features)
-
 
 BottomModel = TwoLayerMlp
 
@@ -88,8 +66,7 @@ def test(
     with torch.no_grad():
         outs = model.forward(x_test)
         preds = torch.argmax(outs, dim=1)
-        actual = torch.argmax(y_test, dim=1)
-        accuracy = torch.sum((preds == actual)).div(dataset_size).item()
+        accuracy = torch.sum((preds == y_test)).div(dataset_size).item()
         loss = loss_function(outs, y_test)
         return accuracy, loss
 
@@ -136,9 +113,8 @@ def train_with_settings(
 
             outs = model.forward(x_minibatch)
             pred = torch.argmax(outs, dim=1)
-            actual = torch.argmax(y_minibatch, dim=1)
-            correct += torch.sum((pred == actual))
-            total += len(actual)
+            correct += torch.sum((pred == y_minibatch))
+            total += len(y_minibatch)
             loss = loss_function(outs, y_minibatch)
             total_loss += loss
             loss.backward()
@@ -150,7 +126,7 @@ def train_with_settings(
         )
 
 
-def encode(
+def _encode_features(
     dataset_train: pd.DataFrame, dataset_test: pd.DataFrame
 ) -> tuple[torch.Tensor, torch.Tensor]:
     categorical_encoder = encoders.OneHotEncoder()
@@ -171,6 +147,15 @@ def encode(
     return preprocessing.as_tensor(dataset_train), preprocessing.as_tensor(dataset_test)
 
 
+def _encode_target(
+    dataset_train: pd.DataFrame, dataset_test: pd.DataFrame
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        preprocessing.as_tensor(dataset_train).squeeze(dim=1).long(),
+        preprocessing.as_tensor(dataset_test).squeeze(dim=1).long(),
+    )
+
+
 def prepare_dataset(
     dataset: pd.DataFrame,
     client_feature_name_mapping: list[list[str]],
@@ -186,7 +171,7 @@ def prepare_dataset(
 
     encoded_features_train, encoded_features_test = zip(
         *[
-            encode(client_dataset_train, client_dataset_test)
+            _encode_features(client_dataset_train, client_dataset_test)
             for client_dataset_train, client_dataset_test in zip(
                 client_datasets_features_train, client_datasets_features_test
             )
@@ -198,7 +183,9 @@ def prepare_dataset(
         train_test_split,
     )
 
-    encoded_target_train, encoded_target_test = encode(dataset_target_train, dataset_target_test)
+    encoded_target_train, encoded_target_test = _encode_target(
+        dataset_target_train, dataset_target_test
+    )
 
     return (
         list(encoded_features_train),
