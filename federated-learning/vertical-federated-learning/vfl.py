@@ -1,11 +1,12 @@
 from pathlib import Path
+import typing
 
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from components import encoders, partitions, preprocessing
+from components import encoders, partitions, preprocessing, metrics
 from models.mlp import TwoLayerMlp
 from torch import nn
 from tqdm import tqdm
@@ -51,14 +52,15 @@ class AggregationModel(nn.Module):
         return self._top_model(local_outputs)
 
 
-def test(
+def _evaluate_epoch(
     *,
     model: nn.Module,
+    loss_function,
     client_datasets: list[torch.Tensor],
     dataset_targets: torch.Tensor,
-    loss_function,
 ) -> tuple[float, float]:
     model.eval()
+
     x_test = client_datasets
     y_test = dataset_targets
     dataset_size = y_test.shape[0]
@@ -68,62 +70,114 @@ def test(
         preds = torch.argmax(outs, dim=1)
         accuracy = torch.sum((preds == y_test)).div(dataset_size).item()
         loss = loss_function(outs, y_test)
-        return accuracy, loss
+
+        return loss, accuracy
 
 
-def train_with_settings(
+type Minibatch = tuple[list[torch.Tensor], torch.Tensor]
+
+
+def _generate_minibatches(
+    x_train: list[torch.Tensor],
+    y_train: torch.Tensor,
+    batch_size: int,
+) -> typing.Iterable[Minibatch]:
+    dataset_size = y_train.shape[0]
+
+    start_idx = 0
+    while start_idx + batch_size < dataset_size:
+        end_idx = start_idx + batch_size
+        x_minibatch = [x[start_idx:end_idx] for x in x_train]
+        y_minibatch = y_train[start_idx:end_idx]
+
+        yield x_minibatch, y_minibatch
+
+        start_idx = end_idx
+
+    x_minibatch = [x[start_idx:] for x in x_train]
+    y_minibatch = y_train[start_idx:]
+
+    yield x_minibatch, y_minibatch
+
+
+def _train_epoch(
+    *,
+    model: nn.Module,
+    batch_size: int,
+    loss_function,
+    optimizer: torch.optim.Optimizer,
+    client_datasets_features: list[torch.Tensor],
+    dataset_targets: torch.Tensor,
+) -> tuple[float, float]:
+    model.train()
+
+    x_train = client_datasets_features
+    y_train = dataset_targets
+
+    optimizer.zero_grad()
+    total_loss = 0.0
+    correct = 0.0
+    total = 0.0
+    batches = 0
+
+    for x_minibatch, y_minibatch in _generate_minibatches(x_train, y_train, batch_size):
+        batches += 1
+
+        outs = model.forward(x_minibatch)
+        pred = torch.argmax(outs, dim=1)
+        correct += torch.sum((pred == y_minibatch)).item()
+        total += len(y_minibatch)
+        loss = loss_function(outs, y_minibatch)
+        total_loss += loss.item()
+        loss.backward()
+
+        optimizer.step()
+
+    epoch_mean_loss = total_loss / batches
+    epoch_mean_accuracy = correct / total
+
+    return epoch_mean_loss, epoch_mean_accuracy
+
+
+def train(
     *,
     model: nn.Module,
     epochs: int,
     batch_size: int,
-    client_datasets: list[torch.Tensor],
-    dataset_targets: torch.Tensor,
     loss_function,
     optimizer: torch.optim.Optimizer,
-):
-    model.train()
-    x_train = client_datasets
-    y_train = dataset_targets
+    client_datasets_features_train: list[torch.Tensor],
+    dataset_targets_train: torch.Tensor,
+    client_datasets_features_test: list[torch.Tensor],
+    dataset_targets_test: torch.Tensor,
+) -> tuple[metrics.EpochStatistics, metrics.EpochStatistics]:
+    training_statistics = metrics.EpochStatistics()
+    test_statistics = metrics.EpochStatistics()
 
-    dataset_size = y_train.shape[0]
-    num_batches = (
-        dataset_size // batch_size
-        if dataset_size % batch_size == 0
-        else dataset_size // batch_size + 1
-    )
-
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        total_loss = 0.0
-        correct = 0.0
-        total = 0.0
-
-        for minibatch in range(num_batches):
-            if minibatch == num_batches - 1:
-                x_minibatch = [x[int(minibatch * batch_size) :] for x in x_train]
-                y_minibatch = y_train[int(minibatch * batch_size) :]
-            else:
-                x_minibatch = [
-                    x[int(minibatch * batch_size) : int((minibatch + 1) * batch_size)]
-                    for x in x_train
-                ]
-                y_minibatch = y_train[
-                    int(minibatch * batch_size) : int((minibatch + 1) * batch_size)
-                ]
-
-            outs = model.forward(x_minibatch)
-            pred = torch.argmax(outs, dim=1)
-            correct += torch.sum((pred == y_minibatch))
-            total += len(y_minibatch)
-            loss = loss_function(outs, y_minibatch)
-            total_loss += loss
-            loss.backward()
-
-            optimizer.step()
-
-        print(
-            f"Epoch: {epoch} Train accuracy: {correct * 100 / total:.2f}% Loss: {total_loss.detach().numpy()/num_batches:.3f}"
+    for _ in tqdm(range(epochs), "epoch", leave=False):
+        epoch_loss_train, epoch_accuracy_train = _train_epoch(
+            model=model,
+            batch_size=batch_size,
+            loss_function=loss_function,
+            optimizer=optimizer,
+            client_datasets_features=client_datasets_features_train,
+            dataset_targets=dataset_targets_train,
         )
+
+        epoch_loss_test, epoch_accuracy_test = _evaluate_epoch(
+            model=model,
+            loss_function=loss_function,
+            client_datasets=client_datasets_features_test,
+            dataset_targets=dataset_targets_test,
+        )
+
+        training_statistics.mean_epoch_losses.append(epoch_loss_train)
+        training_statistics.mean_epoch_accuracies.append(epoch_accuracy_train)
+
+        test_statistics.mean_epoch_losses.append(epoch_loss_test)
+        test_statistics.mean_epoch_accuracies.append(epoch_accuracy_test)
+
+    return training_statistics, test_statistics
 
 
 def _encode_features(
@@ -195,27 +249,27 @@ def prepare_dataset(
     )
 
 
-def main(
+def run(
     *,
     clients: int = 4,
+    client_feature_name_mapping: list[list[str]] | None = None,
     client_output_dimensions_per_feature=2,
     output_dimensions: int = 2,
     epochs: int = 300,
     batch_size: int = 64,
     train_test_split: float = 0.8,
-):
+) -> tuple[metrics.EpochStatistics, metrics.EpochStatistics]:
     torch.manual_seed(42)
     np.random.seed(42)
 
     dataset = preprocessing.load_dataset(
-        Path(__file__).parent.parent / "datasets" / "heart" / "dataset.csv"
+        Path(__file__).parent.parent.parent / "datasets" / "heart" / "dataset.csv"
     )
 
-    client_feature_name_mapping: list[list[str]] = (
-        partitions.partition_elements_uniformly(
+    if client_feature_name_mapping is None:
+        client_feature_name_mapping = partitions.partition_elements_uniformly(
             list(preprocessing.feature_names), clients
         )
-    )
 
     (
         client_datasets_features_train,
@@ -235,26 +289,31 @@ def main(
 
     model = AggregationModel(bottom_models, output_dimensions)
 
-    train_with_settings(
+    return train(
         model=model,
         epochs=epochs,
         batch_size=batch_size,
-        client_datasets=client_datasets_features_train,
-        dataset_targets=dataset_target_train,
         loss_function=nn.CrossEntropyLoss(),
         optimizer=optim.AdamW(model.parameters()),
+        client_datasets_features_train=client_datasets_features_train,
+        dataset_targets_train=dataset_target_train,
+        client_datasets_features_test=client_datasets_features_test,
+        dataset_targets_test=dataset_target_test,
     )
-
-    # testing
-    accuracy, loss = test(
-        model=model,
-        client_datasets=client_datasets_features_test,
-        dataset_targets=dataset_target_test,
-        loss_function=nn.CrossEntropyLoss(),
-    )
-
-    print(f"Test accuracy: {accuracy * 100:.2f}%, test loss: {loss:.3f}")
 
 
 if __name__ == "__main__":
-    main()
+    training_statistics, test_statistics = run()
+
+    print("==== Training statistics ====")
+    for accuracy, loss in zip(
+        training_statistics.mean_epoch_accuracies, training_statistics.mean_epoch_losses
+    ):
+        print(f"{accuracy * 100:.2f}% loss: {loss:.3f}")
+
+    print()
+    print("==== Test statistics ====")
+    for accuracy, loss in zip(
+        test_statistics.mean_epoch_accuracies, test_statistics.mean_epoch_losses
+    ):
+        print(f"{accuracy * 100:.2f}% loss: {loss:.3f}")

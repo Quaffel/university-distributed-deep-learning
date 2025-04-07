@@ -249,7 +249,7 @@ def main(
     torch.manual_seed(42)
 
     dataset = preprocessing.load_dataset(
-        Path(__file__).parent.parent / "datasets" / "heart" / "dataset.csv"
+        Path(__file__).parent.parent.parent / "datasets" / "heart" / "dataset.csv"
     )
 
     client_feature_name_mapping: list[list[str]] = (

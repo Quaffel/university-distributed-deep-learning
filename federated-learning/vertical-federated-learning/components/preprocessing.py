@@ -42,8 +42,8 @@ def encode_dataset(
 
     categorical_features = [
         feature_name
-        for feature_name, feature_type in _features.items()
-        if feature_type == "categorical" and feature_name in dataset.columns
+        for feature_name in dataset.columns
+        if _features.get(feature_name) == "categorical"
     ]
     if len(categorical_features) > 0:
         encoded_categorical_dataset = categorical_encoder(dataset[categorical_features])
@@ -51,8 +51,8 @@ def encode_dataset(
 
     numerical_features = [
         feature_name
-        for feature_name, feature_type in _features.items()
-        if feature_type == "numerical" and feature_name in dataset.columns
+        for feature_name in dataset.columns
+        if _features.get(feature_name) == "numerical"
     ]
     if len(numerical_features) > 0:
         encoded_numerical_dataset = numerical_encoder(dataset[numerical_features])
