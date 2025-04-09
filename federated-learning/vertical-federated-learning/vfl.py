@@ -36,7 +36,7 @@ class TopModel(nn.Module):
 class AggregationModel(nn.Module):
     def __init__(
         self,
-        local_models: list[nn.Module],
+        local_models: nn.ModuleList,
         output_dimension: int,
     ):
         super(AggregationModel, self).__init__()
@@ -287,7 +287,7 @@ def run(
         for client_dataset in client_datasets_features_train
     ]
 
-    model = AggregationModel(bottom_models, output_dimensions)
+    model = AggregationModel(nn.ModuleList(bottom_models), output_dimensions)
 
     return train(
         model=model,
