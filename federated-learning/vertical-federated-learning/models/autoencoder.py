@@ -118,13 +118,3 @@ class Autoencoder(nn.Module):
         pred[:, -1] = np.round(pred[:, -1])
 
         return torch.tensor(pred)
-
-    def sample_concrete(self, samples: int, mean: torch.Tensor, log_variance: torch.Tensor) -> torch.Tensor:
-        sigma = torch.exp(log_variance / 2)
-
-        q = torch.distributions.Normal(mean[0], sigma[0])
-        z = q.rsample(sample_shape=torch.Size([samples]))
-        with torch.no_grad():
-            pred = self.decode(z).cpu().numpy()
-
-        return torch.tensor(pred)

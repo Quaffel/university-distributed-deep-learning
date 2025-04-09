@@ -1,6 +1,6 @@
 import itertools
-import typing
 from pathlib import Path
+import typing
 
 import numpy as np
 import pandas as pd
@@ -25,26 +25,27 @@ class MseKldLoss(nn.Module):
         return loss_MSE + loss_KLD
 
 
-type ModelList[T: nn.Module] = list[T]
-
-
 class AggregationModel(nn.Module):
     def __init__(
         self,
-        client_encoders: ModelList[typing.Any],
-        client_decoders: ModelList[typing.Any],
-        auto_encoder: nn.Module,
+        client_encoders: list[TwoLayerMlp],
+        client_decoders: list[TwoLayerMlp],
+        auto_encoder: Autoencoder,
     ):
         super(AggregationModel, self).__init__()
 
-        self.client_encoders = client_encoders
-        self.client_decoders = client_decoders
+        self.client_encoders = nn.ModuleList(client_encoders)
+        self.client_decoders = nn.ModuleList(client_decoders)
         self.auto_encoder = auto_encoder
+
+        # keep references to typed lists as well to access implementation-specific methods
+        self._client_decoders = client_decoders
+        self._client_encoders = client_encoders
 
     def decode(self, auto_encoder_output: torch.Tensor) -> torch.Tensor:
         decoder_inputs = torch.split(
             auto_encoder_output,
-            [it.input_dimensions for it in self.client_decoders],
+            [it.input_dimensions for it in self._client_decoders],
             dim=1,
         )
 
@@ -74,56 +75,6 @@ class AggregationModel(nn.Module):
         with torch.no_grad():
             auto_encoder_output = self.auto_encoder.sample(samples, dimensions)
             return self.decode(auto_encoder_output)
-
-    def sample_concrete(
-        self, samples: int, mean: torch.Tensor, log_variance: torch.Tensor
-    ) -> torch.Tensor:
-        with torch.no_grad():
-            auto_encoder_output = self.auto_encoder.sample_concrete(
-                samples, mean, log_variance
-            )
-            return self.decode(auto_encoder_output)
-
-
-def _run_evaluator_model(
-    features_train: torch.Tensor,
-    targets_train: torch.Tensor,
-    features_test: torch.Tensor,
-    targets_test: torch.Tensor,
-):
-    model = EvaluatorModel()
-    optimizer = optim.AdamW(model.parameters())
-
-    loss_function = nn.CrossEntropyLoss()
-
-    losses = []
-
-    for epoch in range(1, 50):
-        # train evaluator model
-        optimizer.zero_grad()
-
-        outputs_train = model(features_train)
-        loss = loss_function(outputs_train, targets_train)
-
-        loss.backward()
-        optimizer.step()
-
-        losses.append(loss.item())
-
-        predictions_train = torch.argmax(outputs_train, 1)
-        train_accuracy = accuracy_score(targets_train, predictions_train)
-
-        # test evaluator model
-        outputs_test = model(features_test)
-
-        predictions_test = torch.argmax(outputs_test, 1)
-        test_accuracy = accuracy_score(targets_test, predictions_test)
-
-        print(
-            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
-                epoch, loss.item(), train_accuracy * 100, test_accuracy * 100
-            )
-        )
 
 
 def encode_features(
@@ -195,6 +146,54 @@ def prepare_dataset(
     )
 
 
+def _build_model(
+    *, client_datasets_features: list[torch.Tensor], latent_dimensions_per_input: int
+) -> AggregationModel:
+    client_encoders: list[TwoLayerMlp] = [
+        TwoLayerMlp(
+            client_dataset.shape[1],
+            latent_dimensions_per_input * client_dataset.shape[1],
+        )
+        for client_dataset in client_datasets_features
+    ]
+
+    client_decoders: list[TwoLayerMlp] = [
+        TwoLayerMlp(
+            latent_dimensions_per_input * client_dataset.shape[1],
+            client_dataset.shape[1],
+        )
+        for client_dataset in client_datasets_features
+    ]
+
+    auto_encoder = Autoencoder(
+        input_dimensions=sum(it.output_dimensions for it in client_encoders),
+        wide_hidden_dimensions=48,
+        narrow_hidden_dimensions=32,
+        latent_dimensions=16,
+    )
+
+    return AggregationModel(client_encoders, client_decoders, auto_encoder)
+
+
+type Minibatch = list[torch.Tensor]
+
+
+def _generate_minibatches(
+    x_train: list[torch.Tensor],
+    batch_size: int,
+) -> typing.Iterable[Minibatch]:
+    dataset_size = x_train[0].shape[0]
+
+    start_idx = 0
+    while start_idx + batch_size < dataset_size:
+        end_idx = start_idx + batch_size
+
+        yield [x[start_idx:end_idx] for x in x_train]
+        start_idx = end_idx
+
+    yield [x[start_idx:] for x in x_train]
+
+
 def train_with_settings(
     model: nn.Module,
     epochs: int,
@@ -203,40 +202,109 @@ def train_with_settings(
     optimizer: torch.optim.Optimizer,
     loss_function,
 ):
-
-    dataset_size = real_data[0].shape[0]
-    num_batches = (
-        dataset_size // batch_size
-        if dataset_size % batch_size == 0
-        else dataset_size // batch_size + 1
-    )
+    model.train()
 
     x_train = real_data
     for epoch in range(epochs):
         optimizer.zero_grad()
 
         total_loss = 0.0
-        for minibatch in range(num_batches):
-            if minibatch == num_batches - 1:
-                minibatch_data = [x[int(minibatch * batch_size) :] for x in x_train]
-            else:
-                minibatch_data = [
-                    x[int(minibatch * batch_size) : int((minibatch + 1) * batch_size)]
-                    for x in x_train
-                ]
+        batches = 0
+        for minibatch_data in _generate_minibatches(x_train, batch_size):
+            batches += 1
+
+            outs, mu, logvar = model.forward(minibatch_data)
 
             merged_minibatch_data = torch.concat(minibatch_data, dim=1)
-            outs, mu, logvar = model.forward(minibatch_data)
             loss = loss_function(outs, merged_minibatch_data, mu, logvar)
-            total_loss += loss
+            total_loss += loss.item()
+            
             loss.backward()
             optimizer.step()
 
-        print(f"Epoch: {epoch} Loss: {total_loss.detach().numpy() / num_batches:.3f}")
+        print(f"Epoch: {epoch} Loss: {total_loss / batches:.3f}")
 
 
 def merge(tensors: list[torch.Tensor]) -> torch.Tensor:
     return torch.concat(tensors, dim=1)
+
+
+def _run_evaluator_model(
+    features_train: torch.Tensor,
+    targets_train: torch.Tensor,
+    features_test: torch.Tensor,
+    targets_test: torch.Tensor,
+):
+    model = EvaluatorModel()
+    optimizer = optim.AdamW(model.parameters())
+
+    loss_function = nn.CrossEntropyLoss()
+
+    losses = []
+
+    for epoch in range(1, 50):
+        # train evaluator model
+        optimizer.zero_grad()
+
+        outputs_train = model(features_train)
+        loss = loss_function(outputs_train, targets_train)
+
+        loss.backward()
+        optimizer.step()
+
+        losses.append(loss.item())
+
+        predictions_train = torch.argmax(outputs_train, 1)
+        train_accuracy = accuracy_score(targets_train, predictions_train)
+
+        # test evaluator model
+        outputs_test = model(features_test)
+
+        predictions_test = torch.argmax(outputs_test, 1)
+        test_accuracy = accuracy_score(targets_test, predictions_test)
+
+        print(
+            "Epoch {}, Loss: {:.2f}, Acc:{:.2f}%, Test Acc: {:.2f}%".format(
+                epoch, loss.item(), train_accuracy * 100, test_accuracy * 100
+            )
+        )
+
+
+def _evaluate_autoencoder(
+    *,
+    model: AggregationModel,
+    client_datasets_features_train: list[torch.Tensor],
+    dataset_target_train: torch.Tensor,
+    client_datasets_features_test: list[torch.Tensor],
+    dataset_target_test: torch.Tensor,
+):
+    model.eval()
+    _, mu, logvar = model.forward(client_datasets_features_train)
+
+    synthetic_data = model.sample(len(dataset_target_train), mu.shape[1])
+    synthetic_x = synthetic_data[:, :-1]
+
+    synthetic_y = synthetic_data[:, -1]
+    pred = synthetic_y.cpu().numpy()
+    pred = np.clip(pred, 0, 1)
+    pred = np.round(pred)
+    synthetic_y = torch.tensor(pred).long()
+
+    print("--------------Testing model trained on real data----------")
+    _run_evaluator_model(
+        merge(client_datasets_features_train)[:, :-1],
+        dataset_target_train,
+        merge(client_datasets_features_test)[:, :-1],
+        dataset_target_test,
+    )
+
+    print("--------------Testing model trained on synthetic data----------")
+    _run_evaluator_model(
+        synthetic_x,
+        synthetic_y,
+        merge(client_datasets_features_test)[:, :-1],
+        dataset_target_test,
+    )
 
 
 def main(
@@ -265,45 +333,14 @@ def main(
         dataset_target_test,
     ) = prepare_dataset(dataset, client_feature_name_mapping, train_test_split)
 
-    client_encoders: list[TwoLayerMlp] = [
-        TwoLayerMlp(
-            client_dataset.shape[1],
-            latent_dimensions_per_input * client_dataset.shape[1],
-        )
-        for client_dataset in client_datasets_features_train
-    ]
-
-    client_decoders: list[TwoLayerMlp] = [
-        TwoLayerMlp(
-            latent_dimensions_per_input * client_dataset.shape[1],
-            client_dataset.shape[1],
-        )
-        for client_dataset in client_datasets_features_train
-    ]
-
-    auto_encoder = Autoencoder(
-        input_dimensions=sum(it.output_dimensions for it in client_encoders),
-        wide_hidden_dimensions=48,
-        narrow_hidden_dimensions=32,
-        latent_dimensions=16,
+    model = _build_model(
+        client_datasets_features=client_datasets_features_train,
+        latent_dimensions_per_input=latent_dimensions_per_input,
     )
 
-    model = AggregationModel(client_encoders, client_decoders, auto_encoder)
-
-    client_encoder_parameters = [it.parameters() for it in client_encoders]
-    client_decoder_parameters = [it.parameters() for it in client_decoders]
-
-    parameters = [
-        *model.parameters(),
-        *itertools.chain.from_iterable(client_encoder_parameters),
-        *itertools.chain.from_iterable(client_decoder_parameters),
-    ]
-
-    optimizer = optim.Adam(parameters, lr=1e-3)
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
     loss_function = MseKldLoss()
 
-    for it in [model, auto_encoder, *client_decoders, *client_encoders]:
-        it.train()
     train_with_settings(
         model,
         epochs=200,
@@ -313,34 +350,12 @@ def main(
         loss_function=loss_function,
     )
 
-    for it in [model, auto_encoder, *client_decoders, *client_encoders]:
-        it.eval()
-    _, mu, logvar = model.forward(client_datasets_features_train)
-
-    synthetic_data = model.sample(len(dataset_target_train), mu.shape[1])
-    # synthetic_data = model.sample_concrete(len(dataset_target_train), mu, logvar)
-    synthetic_x = synthetic_data[:, :-1]
-
-    synthetic_y = synthetic_data[:, -1]
-    pred = synthetic_y.cpu().numpy()
-    pred = np.clip(pred, 0, 1)
-    pred = np.round(pred)
-    synthetic_y = torch.tensor(pred).long()
-
-    print("--------------Testing model trained on real data----------")
-    _run_evaluator_model(
-        merge(client_datasets_features_train)[:, :-1],
-        dataset_target_train,
-        merge(client_datasets_features_test)[:, :-1],
-        dataset_target_test,
-    )
-
-    print("--------------Testing model trained on synthetic data----------")
-    _run_evaluator_model(
-        synthetic_x,
-        synthetic_y,
-        merge(client_datasets_features_test)[:, :-1],
-        dataset_target_test,
+    _evaluate_autoencoder(
+        model=model,
+        client_datasets_features_train=client_datasets_features_train,
+        dataset_target_train=dataset_target_train,
+        client_datasets_features_test=client_datasets_features_test,
+        dataset_target_test=dataset_target_test,
     )
 
 
